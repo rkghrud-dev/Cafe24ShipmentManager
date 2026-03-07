@@ -34,11 +34,18 @@ public partial class MainForm
 
     private List<string> ApplyShipmentVendorOrder(IEnumerable<string> vendors)
     {
-        return vendors
+        var ordered = vendors
             .Where(v => !string.IsNullOrWhiteSpace(v))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(v => _favoriteShipmentVendorsEx.Contains(v) ? 0 : 1)
             .ThenBy(v => v)
+            .ToList();
+
+        if (_favoriteShipmentVendorsEx.Count > 0)
+            ordered = ordered.Where(v => _favoriteShipmentVendorsEx.Contains(v)).ToList();
+
+        return ordered
+            .Select(v => FormatVendorLabel(v, _favoriteShipmentVendorsEx.Contains(v)))
             .ToList();
     }
 
@@ -109,8 +116,11 @@ public partial class MainForm
         var idx = sheets.FindIndex(s => s.sheetId == EnhancedStockDefaultSheetGid);
         cboStockSheet.SelectedIndex = idx >= 0 ? idx : (cboStockSheet.Items.Count > 0 ? 0 : -1);
 
-        if (cboStockSheet.SelectedIndex >= 0)
-            await ReloadEnhancedStockDataAsync(showAlert: true);
+        // 초기에는 자동조회하지 않음
+        _stockRowsEx.Clear();
+        dgvStock.Columns.Clear();
+        dgvStock.Rows.Clear();
+        _log.Info("재고관리: 조회 버튼을 눌러야 데이터를 표시합니다.");
     }
 
     private void BuildEnhancedStockUi()
@@ -168,7 +178,7 @@ public partial class MainForm
         _btnStockSelectAll.Click += (_, _) => { for (int i = 0; i < _clbStockVendors.Items.Count; i++) _clbStockVendors.SetItemChecked(i, true); };
         _btnStockDeselectAll.Click += (_, _) => { for (int i = 0; i < _clbStockVendors.Items.Count; i++) _clbStockVendors.SetItemChecked(i, false); };
         _btnStockFavorite.Click += (_, _) => ToggleStockFavoritesEx();
-        _btnStockApplyFilter.Click += (_, _) => ApplyEnhancedStockFilterAndRender();
+        _btnStockApplyFilter.Click += async (_, _) => await QuerySelectedStockAsync();
         _btnStockColumns.Click += (_, _) => OpenEnhancedStockColumnsDialog();
         btnStockLoad.Click += async (_, _) => await ReloadEnhancedStockDataAsync(showAlert: false);
         _txtStockSearch.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { ApplyEnhancedStockFilterAndRender(); e.SuppressKeyPress = true; } };
@@ -188,13 +198,37 @@ public partial class MainForm
         {
             var raw = await Task.Run(() => _sheetsReader.ReadRawSheet(EnhancedStockSpreadsheetId, sheet.Title, 30000));
             _stockRowsEx = ParseStockRowsEx(raw);
+            _db.ReplaceStockInventoryCache(_stockRowsEx.Select(r => new
+            {
+                ProductCode = r.ProductCode,
+                OrderCode = r.OrderCode,
+                Supplier = r.Supplier,
+                ImportCostRaw = r.ImportCostRaw,
+                SupplyPriceRaw = r.SupplyPriceRaw,
+                RetailPriceRaw = r.RetailPriceRaw,
+                InboundRaw = r.InboundRaw,
+                SoldRaw = r.SoldRaw,
+                TwoMonthRaw = r.TwoMonthRaw,
+                OneMonthRaw = r.OneMonthRaw,
+                ThisMonthRaw = r.ThisMonthRaw,
+                StockRaw = r.StockRaw,
+                BuyLink = r.BuyLink,
+                OptionName = r.OptionName,
+                ImportedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+            }));
 
             var vendors = _stockRowsEx.Select(r => r.Supplier).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct().ToList();
-            _clbStockVendors!.Items.Clear();
-            foreach (var v in vendors.OrderBy(v => _favoriteStockVendorsEx.Contains(v) ? 0 : 1).ThenBy(v => v))
-                _clbStockVendors.Items.Add(FormatVendorLabel(v, _favoriteStockVendorsEx.Contains(v)));
+            var vendorOrdered = vendors.OrderBy(v => _favoriteStockVendorsEx.Contains(v) ? 0 : 1).ThenBy(v => v).ToList();
+            if (_favoriteStockVendorsEx.Count > 0)
+                vendorOrdered = vendorOrdered.Where(v => _favoriteStockVendorsEx.Contains(v)).ToList();
 
-            ApplyEnhancedStockFilterAndRender();
+            _clbStockVendors!.Items.Clear();
+            foreach (var v in vendorOrdered)
+                _clbStockVendors.Items.Add(FormatVendorLabel(v, _favoriteStockVendorsEx.Contains(v)), true);
+
+            // 조회 버튼으로만 화면 출력
+            dgvStock.Columns.Clear();
+            dgvStock.Rows.Clear();
             if (showAlert) ShowLowStockAlertEx();
         }
         catch (Exception ex)
@@ -209,6 +243,26 @@ public partial class MainForm
         }
     }
 
+
+    private async Task QuerySelectedStockAsync()
+    {
+        if (_clbStockVendors == null) return;
+
+        // 데이터 없으면 먼저 로드(새로고침과 동일)
+        if (_stockRowsEx.Count == 0)
+            await ReloadEnhancedStockDataAsync(showAlert: false);
+
+        var selectedCount = _clbStockVendors.CheckedItems.Count;
+        if (selectedCount == 0)
+        {
+            dgvStock.Columns.Clear();
+            dgvStock.Rows.Clear();
+            MessageBox.Show("발주사(공급사)를 1개 이상 선택 후 조회하세요.", "알림");
+            return;
+        }
+
+        ApplyEnhancedStockFilterAndRender();
+    }
     private void ApplyEnhancedStockFilterAndRender()
     {
         if (_clbStockVendors == null || _txtStockSearch == null) return;
@@ -606,6 +660,13 @@ public class StockColumnSelectDialogEx : Form
         CancelButton = btnCancel;
     }
 }
+
+
+
+
+
+
+
 
 
 

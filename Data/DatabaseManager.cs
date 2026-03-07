@@ -87,7 +87,29 @@ public class DatabaseManager
             CREATE INDEX IF NOT EXISTS idx_source_vendor ON shipment_source_rows(VendorName);
             CREATE INDEX IF NOT EXISTS idx_source_phone ON shipment_source_rows(RecipientPhone);
             CREATE INDEX IF NOT EXISTS idx_cache_phone ON cafe24_orders_cache(RecipientCellPhone);
+
+            CREATE TABLE IF NOT EXISTS stock_inventory_cache (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ProductCode TEXT DEFAULT '',
+                OrderCode TEXT DEFAULT '',
+                Supplier TEXT DEFAULT '',
+                ImportCostRaw TEXT DEFAULT '',
+                SupplyPriceRaw TEXT DEFAULT '',
+                RetailPriceRaw TEXT DEFAULT '',
+                InboundRaw TEXT DEFAULT '',
+                SoldRaw TEXT DEFAULT '',
+                TwoMonthRaw TEXT DEFAULT '',
+                OneMonthRaw TEXT DEFAULT '',
+                ThisMonthRaw TEXT DEFAULT '',
+                StockRaw TEXT DEFAULT '',
+                BuyLink TEXT DEFAULT '',
+                OptionName TEXT DEFAULT '',
+                ImportedAt TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_match_source ON match_results(SourceRowId);
+            CREATE INDEX IF NOT EXISTS idx_stock_supplier ON stock_inventory_cache(Supplier);
+            CREATE INDEX IF NOT EXISTS idx_stock_product ON stock_inventory_cache(ProductCode);
         ");
     }
 
@@ -193,6 +215,27 @@ public class DatabaseManager
         conn.Execute($"DELETE FROM match_results WHERE SourceRowId IN ({ids})");
     }
 
+
+    // ── Stock Inventory Cache ──
+    public void ReplaceStockInventoryCache(IEnumerable<object> rows)
+    {
+        using var conn = GetConnection();
+        using var tx = conn.BeginTransaction();
+
+        conn.Execute("DELETE FROM stock_inventory_cache", transaction: tx);
+
+        conn.Execute(@"
+            INSERT INTO stock_inventory_cache
+                (ProductCode, OrderCode, Supplier, ImportCostRaw, SupplyPriceRaw, RetailPriceRaw,
+                 InboundRaw, SoldRaw, TwoMonthRaw, OneMonthRaw, ThisMonthRaw, StockRaw,
+                 BuyLink, OptionName, ImportedAt)
+            VALUES
+                (@ProductCode, @OrderCode, @Supplier, @ImportCostRaw, @SupplyPriceRaw, @RetailPriceRaw,
+                 @InboundRaw, @SoldRaw, @TwoMonthRaw, @OneMonthRaw, @ThisMonthRaw, @StockRaw,
+                 @BuyLink, @OptionName, @ImportedAt)", rows, transaction: tx);
+
+        tx.Commit();
+    }
     // ── Push Log ──
     public void InsertPushLog(PushLog log)
     {
@@ -211,3 +254,5 @@ public class DatabaseManager
             "SELECT * FROM push_log ORDER BY Id DESC LIMIT @limit", new { limit }).ToList();
     }
 }
+
+
