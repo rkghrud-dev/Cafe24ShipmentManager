@@ -110,6 +110,32 @@ public class DatabaseManager
             CREATE INDEX IF NOT EXISTS idx_match_source ON match_results(SourceRowId);
             CREATE INDEX IF NOT EXISTS idx_stock_supplier ON stock_inventory_cache(Supplier);
             CREATE INDEX IF NOT EXISTS idx_stock_product ON stock_inventory_cache(ProductCode);
+
+            CREATE TABLE IF NOT EXISTS stock_order_headers (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                BaseCodeA TEXT DEFAULT '',
+                SiteUrl TEXT DEFAULT '',
+                TotalQty INTEGER DEFAULT 0,
+                TotalAmountYuan REAL DEFAULT 0,
+                ItemCount INTEGER DEFAULT 0,
+                OrderedAt TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS stock_order_lines (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                HeaderId INTEGER NOT NULL,
+                ProductCode TEXT DEFAULT '',
+                ImportDetail TEXT DEFAULT '',
+                OptionText TEXT DEFAULT '',
+                OrderQty INTEGER DEFAULT 0,
+                UnitYuan REAL DEFAULT 0,
+                AmountYuan REAL DEFAULT 0,
+                FOREIGN KEY (HeaderId) REFERENCES stock_order_headers(Id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_soh_ordered ON stock_order_headers(OrderedAt);
+            CREATE INDEX IF NOT EXISTS idx_sol_header ON stock_order_lines(HeaderId);
+            CREATE INDEX IF NOT EXISTS idx_sol_product ON stock_order_lines(ProductCode);
         ");
     }
 
@@ -252,6 +278,143 @@ public class DatabaseManager
         using var conn = GetConnection();
         return conn.Query<PushLog>(
             "SELECT * FROM push_log ORDER BY Id DESC LIMIT @limit", new { limit }).ToList();
+    }
+
+    // ── Stock Order History ──
+    public long InsertStockOrder(StockOrderHeader header, List<StockOrderLine> lines)
+    {
+        using var conn = GetConnection();
+        using var tx = conn.BeginTransaction();
+
+        var headerId = conn.ExecuteScalar<long>(@"
+            INSERT INTO stock_order_headers (BaseCodeA, SiteUrl, TotalQty, TotalAmountYuan, ItemCount, OrderedAt)
+            VALUES (@BaseCodeA, @SiteUrl, @TotalQty, @TotalAmountYuan, @ItemCount, @OrderedAt);
+            SELECT last_insert_rowid();", header, transaction: tx);
+
+        foreach (var line in lines)
+        {
+            line.HeaderId = headerId;
+            conn.Execute(@"
+                INSERT INTO stock_order_lines (HeaderId, ProductCode, ImportDetail, OptionText, OrderQty, UnitYuan, AmountYuan)
+                VALUES (@HeaderId, @ProductCode, @ImportDetail, @OptionText, @OrderQty, @UnitYuan, @AmountYuan)", line, transaction: tx);
+        }
+
+        tx.Commit();
+        return headerId;
+    }
+
+    public List<StockOrderHeader> SearchStockOrderHeaders(string? dateFrom, string? dateTo, string? productCodeFilter)
+    {
+        using var conn = GetConnection();
+        var sql = "SELECT DISTINCT h.* FROM stock_order_headers h";
+        var where = new List<string>();
+        var param = new DynamicParameters();
+
+        if (!string.IsNullOrWhiteSpace(productCodeFilter))
+        {
+            sql += " INNER JOIN stock_order_lines l ON l.HeaderId = h.Id";
+            where.Add("l.ProductCode LIKE @code");
+            param.Add("code", $"%{productCodeFilter.Trim()}%");
+        }
+        if (!string.IsNullOrWhiteSpace(dateFrom))
+        {
+            where.Add("h.OrderedAt >= @dateFrom");
+            param.Add("dateFrom", dateFrom);
+        }
+        if (!string.IsNullOrWhiteSpace(dateTo))
+        {
+            where.Add("h.OrderedAt <= @dateTo");
+            param.Add("dateTo", dateTo + " 23:59:59");
+        }
+
+        if (where.Count > 0)
+            sql += " WHERE " + string.Join(" AND ", where);
+        sql += " ORDER BY h.OrderedAt DESC";
+
+        return conn.Query<StockOrderHeader>(sql, param).ToList();
+    }
+
+    public List<StockOrderLine> GetStockOrderLines(long headerId)
+    {
+        using var conn = GetConnection();
+        return conn.Query<StockOrderLine>(
+            "SELECT * FROM stock_order_lines WHERE HeaderId = @headerId ORDER BY Id",
+            new { headerId }).ToList();
+    }
+
+    public List<TopOrderedProduct> GetTopOrderedProducts(string? dateFrom, string? dateTo, int topN = 20)
+    {
+        using var conn = GetConnection();
+        var where = new List<string>();
+        var param = new DynamicParameters();
+        param.Add("topN", topN);
+
+        if (!string.IsNullOrWhiteSpace(dateFrom))
+        {
+            where.Add("h.OrderedAt >= @dateFrom");
+            param.Add("dateFrom", dateFrom);
+        }
+        if (!string.IsNullOrWhiteSpace(dateTo))
+        {
+            where.Add("h.OrderedAt <= @dateTo");
+            param.Add("dateTo", dateTo + " 23:59:59");
+        }
+
+        var whereClause = where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "";
+
+        return conn.Query<TopOrderedProduct>($@"
+            SELECT l.ProductCode, SUM(l.OrderQty) AS TotalQty, COUNT(DISTINCT l.HeaderId) AS OrderCount
+            FROM stock_order_lines l
+            INNER JOIN stock_order_headers h ON h.Id = l.HeaderId
+            {whereClause}
+            GROUP BY l.ProductCode
+            ORDER BY TotalQty DESC
+            LIMIT @topN", param).ToList();
+    }
+
+    public List<OptionMonthlyRecord> GetOptionMonthlyBreakdown(string baseCodeA)
+    {
+        using var conn = GetConnection();
+        return conn.Query<OptionMonthlyRecord>(@"
+            SELECT l.ProductCode, l.OptionText, SUBSTR(h.OrderedAt, 1, 7) AS Month, SUM(l.OrderQty) AS TotalQty
+            FROM stock_order_lines l
+            INNER JOIN stock_order_headers h ON h.Id = l.HeaderId
+            WHERE h.BaseCodeA = @baseCodeA
+            GROUP BY l.ProductCode, l.OptionText, SUBSTR(h.OrderedAt, 1, 7)
+            ORDER BY l.ProductCode, Month", new { baseCodeA }).ToList();
+    }
+
+    public List<MonthlyOrderTrend> GetMonthlyOrderTrend(string? productCode, string? dateFrom, string? dateTo)
+    {
+        using var conn = GetConnection();
+        var where = new List<string>();
+        var param = new DynamicParameters();
+
+        if (!string.IsNullOrWhiteSpace(productCode))
+        {
+            where.Add("l.ProductCode LIKE @code");
+            param.Add("code", $"%{productCode.Trim()}%");
+        }
+        if (!string.IsNullOrWhiteSpace(dateFrom))
+        {
+            where.Add("h.OrderedAt >= @dateFrom");
+            param.Add("dateFrom", dateFrom);
+        }
+        if (!string.IsNullOrWhiteSpace(dateTo))
+        {
+            where.Add("h.OrderedAt <= @dateTo");
+            param.Add("dateTo", dateTo + " 23:59:59");
+        }
+
+        var whereClause = where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "";
+
+        return conn.Query<MonthlyOrderTrend>($@"
+            SELECT SUBSTR(h.OrderedAt, 1, 7) AS Month, SUM(l.OrderQty) AS TotalQty, SUM(l.AmountYuan) AS TotalAmountYuan
+            FROM stock_order_lines l
+            INNER JOIN stock_order_headers h ON h.Id = l.HeaderId
+            {whereClause}
+            GROUP BY SUBSTR(h.OrderedAt, 1, 7)
+            ORDER BY Month", param).ToList();
     }
 }
 

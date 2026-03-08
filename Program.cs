@@ -1,6 +1,7 @@
 using Cafe24ShipmentManager;
 using Cafe24ShipmentManager.Data;
 using Cafe24ShipmentManager.Services;
+using Microsoft.Data.Sqlite;
 using Newtonsoft.Json.Linq;
 
 namespace Cafe24ShipmentManager;
@@ -40,7 +41,7 @@ static class Program
 
         // Google Sheets 설정
         var gsSection = config["GoogleSheets"];
-        var credentialPath = gsSection?["CredentialPath"]?.ToString() ?? "";
+        var credentialPath = ResolvePath(gsSection?["CredentialPath"]?.ToString() ?? "");
         var spreadsheetId = gsSection?["SpreadsheetId"]?.ToString() ?? "";
         var defaultSheetName = gsSection?["DefaultSheetName"]?.ToString() ?? "";
 
@@ -59,12 +60,28 @@ static class Program
             ConfigFilePath = configPath
         };
 
-        var dbConnStr = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
-        var logDir = config["Logging"]?["LogDirectory"]?.ToString() ?? "logs";
+        var dbConnStrRaw = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
+        var dbConnStr = NormalizeSqliteConnectionString(dbConnStrRaw);
+        var logDir = ResolvePath(config["Logging"]?["LogDirectory"]?.ToString() ?? "logs");
 
         var logger = new AppLogger(logDir);
         var db = new DatabaseManager(dbConnStr);
 
         Application.Run(new MainForm(db, logger, cafe24Config, credentialPath, spreadsheetId, defaultSheetName));
     }
+
+    private static string ResolvePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return path;
+        return Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
+    }
+
+    private static string NormalizeSqliteConnectionString(string connectionString)
+    {
+        var builder = new SqliteConnectionStringBuilder(connectionString);
+        if (!string.IsNullOrWhiteSpace(builder.DataSource))
+            builder.DataSource = ResolvePath(builder.DataSource);
+        return builder.ToString();
+    }
 }
+

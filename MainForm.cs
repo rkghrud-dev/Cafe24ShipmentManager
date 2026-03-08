@@ -156,6 +156,8 @@ public partial class MainForm : Form
             foreach (var v in ApplyShipmentVendorOrder(vendors))
                 clbVendors.Items.Add(v);
 
+            SyncStockVendorsFromShipment();
+
             lblStatus.Text = $"✅ '{sheetName}' — 발주사 {vendors.Count}개 로드됨";
             lblStatus.ForeColor = Color.DarkGreen;
         }
@@ -804,11 +806,4 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
-
-
-
-
-
-
-
 
