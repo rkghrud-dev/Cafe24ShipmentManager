@@ -18,6 +18,7 @@ public class Cafe24Config
     public string DefaultShippingCompanyCode { get; set; } = "0019"; // CJ대한통운
     public int OrderFetchDays { get; set; } = 14;
     public string? ConfigFilePath { get; set; }
+    public string RedirectUri { get; set; } = "";
 }
 
 public class Cafe24ApiClient
@@ -314,7 +315,8 @@ public class Cafe24ApiClient
             if (!resp.IsSuccessStatusCode)
             {
                 _log.Error($"토큰 갱신 실패 ({resp.StatusCode}): {body}");
-                return false;
+                _log.Info("OAuth 브라우저 재인증을 시도합니다...");
+                return await ReauthorizeViaOAuthAsync();
             }
 
             var json = JObject.Parse(body);
@@ -348,6 +350,137 @@ public class Cafe24ApiClient
             return false;
         }
     }
+    /// <summary>
+    /// Refresh Token 만료 시 브라우저 OAuth 재인증으로 새 토큰 발급
+    /// </summary>
+    public async Task<bool> ReauthorizeViaOAuthAsync()
+    {
+        if (string.IsNullOrEmpty(_config.ClientId) || string.IsNullOrEmpty(_config.RedirectUri))
+        {
+            _log.Error($"OAuth 재인증 불가: ClientId='{_config.ClientId}', RedirectUri='{_config.RedirectUri}'");
+            return false;
+        }
+
+        var scope = "mall.read_order,mall.write_order,mall.read_shipping,mall.write_shipping";
+        var state = Guid.NewGuid().ToString("N")[..8];
+        var authUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/authorize" +
+            $"?response_type=code&client_id={_config.ClientId}" +
+            $"&redirect_uri={Uri.EscapeDataString(_config.RedirectUri)}" +
+            $"&scope={scope}&state={state}";
+
+        // 브라우저 열기
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
+
+        // 사용자에게 URL 붙여넣기 요청
+        var code = PromptForAuthorizationCode();
+        if (string.IsNullOrEmpty(code))
+        {
+            _log.Warn("OAuth 재인증 취소됨");
+            return false;
+        }
+
+        // 인증 코드로 토큰 교환
+        try
+        {
+            var tokenUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/token";
+            var authBytes = Encoding.ASCII.GetBytes($"{_config.ClientId}:{_config.ClientSecret}");
+            var authHeader = Convert.ToBase64String(authBytes);
+
+            using var tokenHttp = new HttpClient();
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Basic", authHeader) },
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    { "grant_type", "authorization_code" },
+                    { "code", code },
+                    { "redirect_uri", _config.RedirectUri }
+                })
+            };
+
+            var resp = await tokenHttp.SendAsync(request);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.Error($"OAuth 토큰 교환 실패 ({resp.StatusCode}): {body}");
+                MessageBox.Show($"토큰 발급 실패:\n{body}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
+            var json = JObject.Parse(body);
+            var newAccessToken = json["access_token"]?.ToString();
+            var newRefreshToken = json["refresh_token"]?.ToString();
+
+            if (string.IsNullOrEmpty(newAccessToken))
+            {
+                _log.Error($"토큰 응답에 access_token 없음: {body}");
+                return false;
+            }
+
+            _config.AccessToken = newAccessToken;
+            if (!string.IsNullOrEmpty(newRefreshToken))
+                _config.RefreshToken = newRefreshToken;
+
+            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", newAccessToken);
+            _log.Info("OAuth 재인증 성공 — 새 토큰 발급 완료");
+
+            SaveTokensToConfig();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("OAuth 토큰 교환 예외", ex);
+            return false;
+        }
+    }
+
+    private static string? PromptForAuthorizationCode()
+    {
+        using var dlg = new Form
+        {
+            Text = "Cafe24 OAuth 재인증",
+            Size = new Size(560, 200),
+            StartPosition = FormStartPosition.CenterScreen,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false, MinimizeBox = false
+        };
+
+        var lbl = new Label
+        {
+            Text = "브라우저에서 Cafe24 로그인 후,\n리다이렉트된 URL 전체를 아래에 붙여넣으세요.\n(예: https://...callback?code=XXXXX&state=...)",
+            Location = new Point(12, 12), AutoSize = true
+        };
+        var txt = new TextBox { Location = new Point(12, 72), Width = 520, Height = 24 };
+        var btnOk = new Button { Text = "확인", DialogResult = DialogResult.OK, Location = new Point(370, 110), Width = 80, Height = 30 };
+        var btnCancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(454, 110), Width = 80, Height = 30 };
+        dlg.AcceptButton = btnOk;
+        dlg.CancelButton = btnCancel;
+        dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+
+        if (dlg.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(txt.Text))
+            return null;
+
+        var input = txt.Text.Trim();
+        // URL에서 code 파라미터 추출 또는 코드 직접 입력
+        if (input.Contains("code="))
+        {
+            try
+            {
+                var uri = new Uri(input);
+                var queryStr = uri.Query.TrimStart('?');
+                foreach (var pair in queryStr.Split('&'))
+                {
+                    var kv = pair.Split('=', 2);
+                    if (kv.Length == 2 && kv[0] == "code")
+                        return Uri.UnescapeDataString(kv[1]);
+                }
+            }
+            catch { }
+        }
+        return input; // 코드 직접 입력
+    }
+
     private void SaveTokensToConfig()
     {
         try

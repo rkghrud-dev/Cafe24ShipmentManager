@@ -57,7 +57,8 @@ static class Program
             ApiVersion = cafe24Section?["ApiVersion"]?.ToString() ?? "2023-03-01",
             DefaultShippingCompanyCode = cafe24Section?["DefaultShippingCompanyCode"]?.ToString() ?? "0019",
             OrderFetchDays = cafe24Section?["OrderFetchDays"]?.Value<int>() ?? 14,
-            ConfigFilePath = configPath
+            ConfigFilePath = configPath,
+            RedirectUri = cafe24Section?["RedirectUri"]?.ToString() ?? ""
         };
 
         var dbConnStrRaw = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
