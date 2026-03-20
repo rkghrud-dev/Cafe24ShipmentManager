@@ -69,9 +69,10 @@ internal static class Cafe24SharedTokenStore
             return GetDefaultPath();
         }
 
-        return Path.IsPathRooted(path)
-            ? path
-            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
+        var expandedPath = Environment.ExpandEnvironmentVariables(path);
+        return Path.IsPathRooted(expandedPath)
+            ? expandedPath
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
     }
 
     private static string Pick(JObject json, string propertyName, string fallback)

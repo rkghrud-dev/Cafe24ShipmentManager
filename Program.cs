@@ -74,7 +74,11 @@ static class Program
     private static string ResolvePath(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return path;
-        return Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
+
+        var expandedPath = Environment.ExpandEnvironmentVariables(path);
+        return Path.IsPathRooted(expandedPath)
+            ? expandedPath
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
     }
 
     private static string NormalizeSqliteConnectionString(string connectionString)
