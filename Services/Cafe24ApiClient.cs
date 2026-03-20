@@ -19,6 +19,9 @@ public class Cafe24Config
     public int OrderFetchDays { get; set; } = 14;
     public string? ConfigFilePath { get; set; }
     public string RedirectUri { get; set; } = "";
+    public string ShopNo { get; set; } = "1";
+    public string Scope { get; set; } = "";
+    public string TokenFilePath { get; set; } = "";
 }
 
 public class Cafe24ApiClient
@@ -504,23 +507,27 @@ public class Cafe24ApiClient
     {
         try
         {
+            Cafe24SharedTokenStore.Save(_config);
+            _log.Info($"공유 Cafe24 토큰 파일 저장 완료: {_config.TokenFilePath}");
+
             var configPath = _config.ConfigFilePath;
             if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath)) return;
 
             var text = File.ReadAllText(configPath);
             var json = JObject.Parse(text);
             var cafe24 = json["Cafe24"] as JObject;
-            if (cafe24 == null) return;
+            if (cafe24 == null)
+            {
+                cafe24 = new JObject();
+                json["Cafe24"] = cafe24;
+            }
 
-            cafe24["AccessToken"] = _config.AccessToken;
-            cafe24["RefreshToken"] = _config.RefreshToken;
-
+            cafe24["TokenFilePath"] = _config.TokenFilePath;
             File.WriteAllText(configPath, json.ToString(Formatting.Indented));
-            _log.Info("appsettings.json 토큰 저장 완료");
         }
         catch (Exception ex)
         {
-            _log.Warn($"appsettings.json 토큰 저장 실패: {ex.Message}");
+            _log.Warn($"공유 Cafe24 토큰 저장 실패: {ex.Message}");
         }
     }
 }

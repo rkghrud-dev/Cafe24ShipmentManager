@@ -8,3 +8,5 @@ credentials.json
 cafe24_token.txt
 *.user
 .vs/
+__pycache__/
+*.bak
