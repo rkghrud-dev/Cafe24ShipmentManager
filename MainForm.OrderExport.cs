@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using ClosedXML.Excel;
 using Cafe24ShipmentManager.Models;
+using Newtonsoft.Json.Linq;
 
 namespace Cafe24ShipmentManager;
 
@@ -13,6 +15,12 @@ public partial class MainForm
     private Button? _btnOrderDeselectAllEx;
     private Button? _btnOrderExportEx;
     private Label? _lblOrderSelectionEx;
+    private ComboBox? _cboOrderExportMarketEx;
+    private DateTimePicker? _dtpOrderExportDateEx;
+    private Label? _lblOrderExportSummaryEx;
+    private ContextMenuStrip? _menuOrderExportEx;
+    private ToolStripMenuItem? _itemOrderExportCopyEx;
+    private ToolStripMenuItem? _itemOrderExportSaveEx;
     private bool _orderExportUiInitializedEx;
 
     private void EnsureOrderExportUi()
@@ -45,8 +53,8 @@ public partial class MainForm
         _btnOrderExportEx = new Button
         {
             Name = "btnOrderExportEx",
-            Text = "📋 선택 주문 내보내기",
-            Width = 178,
+            Text = "출고용",
+            Width = 96,
             Height = 30,
             Location = new Point(312, 3),
             Enabled = false
@@ -54,7 +62,7 @@ public partial class MainForm
         _lblOrderSelectionEx = new Label
         {
             AutoSize = true,
-            Location = new Point(502, 9),
+            Location = new Point(420, 9),
             ForeColor = Color.DimGray,
             Text = "선택 0 / 0"
         };
@@ -69,7 +77,7 @@ public partial class MainForm
 
         _btnOrderSelectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(true);
         _btnOrderDeselectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(false);
-        _btnOrderExportEx.Click += (_, _) => OpenSelectedOrdersExportDialogEx();
+        _btnOrderExportEx.Click += (_, _) => ShowOrderExportPopupMenuEx();
 
         dgvData.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -82,6 +90,7 @@ public partial class MainForm
                 UpdateOrderSelectionSummaryEx();
         };
 
+        EnsureOrderExportPopupMenuEx();
         UpdateOrderSelectionSummaryEx();
     }
 
@@ -99,6 +108,83 @@ public partial class MainForm
             AutoSizeMode = DataGridViewAutoSizeColumnMode.None
         };
         dgvData.Columns.Insert(0, col);
+    }
+
+    private void EnsureOrderExportPopupMenuEx()
+    {
+        if (_menuOrderExportEx != null) return;
+
+        _cboOrderExportMarketEx = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDown,
+            Width = 150
+        };
+        _cboOrderExportMarketEx.Items.AddRange(new object[]
+        {
+            ShipmentRequestOrderExportFormatterEx.DefaultMarketName,
+            "반짝세일",
+            "스마트스토어"
+        });
+        _cboOrderExportMarketEx.Text = ShipmentRequestOrderExportFormatterEx.DefaultMarketName;
+
+        _dtpOrderExportDateEx = new DateTimePicker
+        {
+            Width = 120,
+            Format = DateTimePickerFormat.Custom,
+            CustomFormat = "yyyy-MM-dd",
+            Value = DateTime.Today
+        };
+
+        _lblOrderExportSummaryEx = new Label
+        {
+            AutoSize = true,
+            ForeColor = Color.DimGray,
+            MaximumSize = new Size(280, 0),
+            Text = "선택 주문을 체크하면 출고용 작업 메뉴가 열립니다."
+        };
+
+        _cboOrderExportMarketEx.TextChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
+        _dtpOrderExportDateEx.ValueChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
+
+        var contentPanel = new TableLayoutPanel
+        {
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 3,
+            Padding = new Padding(10),
+            Margin = Padding.Empty
+        };
+        contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        contentPanel.Controls.Add(new Label { AutoSize = true, Text = "B열 마켓명:", Margin = new Padding(0, 6, 8, 4) }, 0, 0);
+        contentPanel.Controls.Add(_cboOrderExportMarketEx, 1, 0);
+        contentPanel.Controls.Add(new Label { AutoSize = true, Text = "C열 날짜:", Margin = new Padding(0, 8, 8, 4) }, 0, 1);
+        contentPanel.Controls.Add(_dtpOrderExportDateEx, 1, 1);
+        contentPanel.Controls.Add(_lblOrderExportSummaryEx, 0, 2);
+        contentPanel.SetColumnSpan(_lblOrderExportSummaryEx, 2);
+
+        var host = new ToolStripControlHost(contentPanel)
+        {
+            AutoSize = false,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            Size = contentPanel.GetPreferredSize(Size.Empty)
+        };
+
+        _itemOrderExportCopyEx = new ToolStripMenuItem("클립보드 복사");
+        _itemOrderExportSaveEx = new ToolStripMenuItem("엑셀 저장");
+        _itemOrderExportCopyEx.Click += (_, _) => CopySelectedOrdersToClipboardEx();
+        _itemOrderExportSaveEx.Click += (_, _) => SaveSelectedOrdersWorkbookEx();
+
+        _menuOrderExportEx = new ContextMenuStrip
+        {
+            ShowImageMargin = false,
+            ShowCheckMargin = false
+        };
+        _menuOrderExportEx.Items.Add(host);
+        _menuOrderExportEx.Items.Add(new ToolStripSeparator());
+        _menuOrderExportEx.Items.Add(_itemOrderExportCopyEx);
+        _menuOrderExportEx.Items.Add(_itemOrderExportSaveEx);
     }
 
     private void SetAllPreviewOrdersCheckedEx(bool isChecked)
@@ -146,321 +232,434 @@ public partial class MainForm
 
         if (_btnOrderExportEx != null)
             _btnOrderExportEx.Enabled = selected > 0;
+
+        RefreshOrderExportPopupSummaryEx();
     }
 
-    private void OpenSelectedOrdersExportDialogEx()
+    private void ShowOrderExportPopupMenuEx()
     {
         var selectedOrders = GetCheckedPreviewOrdersEx();
         if (selectedOrders.Count == 0)
         {
-            MessageBox.Show("먼저 데이터 프리뷰에서 주문을 체크하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "먼저 데이터 프리뷰에서 주문을 체크하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        using var dialog = new SelectedOrdersExportDialogEx(selectedOrders);
-        dialog.ShowDialog(this);
-        _log.Info($"선택 주문 내보내기 창 열림: {selectedOrders.Count}건");
-    }
-}
+        EnsureOrderExportPopupMenuEx();
+        ApplyOrderExportDefaultsEx(selectedOrders);
+        RefreshOrderExportPopupSummaryEx(selectedOrders);
 
-internal sealed class SelectedOrdersExportDialogEx : Form
-{
-    private readonly List<OrderExportRowEx> _rows;
-    private readonly TextBox _txtSpreadsheet;
-    private readonly TextBox _txtSql;
-    private readonly TextBox _txtTableName;
+        if (_btnOrderExportEx != null && _menuOrderExportEx != null)
+            _menuOrderExportEx.Show(_btnOrderExportEx, new Point(0, _btnOrderExportEx.Height));
 
-    public SelectedOrdersExportDialogEx(IEnumerable<Cafe24Order> orders)
-    {
-        _rows = orders.Select(OrderExportRowEx.FromOrder).ToList();
-
-        Text = $"선택 주문 내보내기 ({_rows.Count}건)";
-        Size = new Size(1180, 780);
-        StartPosition = FormStartPosition.CenterParent;
-
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            Padding = new Padding(10)
-        };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        var top = new Panel { Dock = DockStyle.Top, Height = 36 };
-        var lblInfo = new Label
-        {
-            Text = $"선택 주문: {_rows.Count}건",
-            AutoSize = true,
-            Location = new Point(4, 9)
-        };
-        var lblTable = new Label
-        {
-            Text = "SQL 테이블:",
-            AutoSize = true,
-            Location = new Point(180, 9)
-        };
-        _txtTableName = new TextBox
-        {
-            Text = "your_table_name",
-            Location = new Point(255, 5),
-            Width = 220
-        };
-        top.Controls.AddRange(new Control[] { lblInfo, lblTable, _txtTableName });
-
-        var tabs = new TabControl { Dock = DockStyle.Fill };
-        _txtSpreadsheet = CreateOutputTextBox();
-        _txtSql = CreateOutputTextBox();
-
-        var tabSheet = new TabPage("스프레드시트 붙여넣기");
-        tabSheet.Controls.Add(_txtSpreadsheet);
-        var tabSql = new TabPage("SQL 붙여넣기");
-        tabSql.Controls.Add(_txtSql);
-
-        tabs.TabPages.Add(tabSheet);
-        tabs.TabPages.Add(tabSql);
-
-        var btnPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            FlowDirection = FlowDirection.RightToLeft
-        };
-        var btnClose = new Button { Text = "닫기", Width = 90, Height = 32, DialogResult = DialogResult.OK };
-        var btnSaveExcel = new Button { Text = "엑셀 저장", Width = 90, Height = 32 };
-        var btnCopySql = new Button { Text = "SQL 복사", Width = 90, Height = 32 };
-        var btnCopySheet = new Button { Text = "시트 복사", Width = 90, Height = 32 };
-
-        btnCopySheet.Click += (_, _) =>
-        {
-            Clipboard.SetText(_txtSpreadsheet.Text);
-            MessageBox.Show(this, "스프레드시트 붙여넣기용 텍스트를 클립보드에 복사했습니다.", "복사 완료",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
-        btnCopySql.Click += (_, _) =>
-        {
-            Clipboard.SetText(_txtSql.Text);
-            MessageBox.Show(this, "SQL 붙여넣기용 텍스트를 클립보드에 복사했습니다.", "복사 완료",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
-        btnSaveExcel.Click += (_, _) => SaveExcel();
-        _txtTableName.TextChanged += (_, _) => RefreshOutputs();
-
-        btnPanel.Controls.AddRange(new Control[] { btnClose, btnSaveExcel, btnCopySql, btnCopySheet });
-
-        root.Controls.Add(top, 0, 0);
-        root.Controls.Add(tabs, 0, 1);
-        root.Controls.Add(btnPanel, 0, 2);
-        Controls.Add(root);
-
-        AcceptButton = btnClose;
-        RefreshOutputs();
+        _log.Info($"선택 주문 출고용 팝업 메뉴 열림: {selectedOrders.Count}건");
     }
 
-    private static TextBox CreateOutputTextBox()
+    private void ApplyOrderExportDefaultsEx(IReadOnlyCollection<Cafe24Order> selectedOrders)
     {
-        return new TextBox
+        if (_dtpOrderExportDateEx != null)
+            _dtpOrderExportDateEx.Value = ShipmentRequestOrderExportFormatterEx.ResolveDefaultDate(selectedOrders);
+
+        if (_cboOrderExportMarketEx != null && string.IsNullOrWhiteSpace(_cboOrderExportMarketEx.Text))
+            _cboOrderExportMarketEx.Text = ShipmentRequestOrderExportFormatterEx.DefaultMarketName;
+    }
+
+    private void RefreshOrderExportPopupSummaryEx(IReadOnlyCollection<Cafe24Order>? selectedOrders = null)
+    {
+        if (_lblOrderExportSummaryEx == null) return;
+
+        var orders = selectedOrders ?? GetCheckedPreviewOrdersEx();
+        if (orders.Count == 0)
         {
-            Dock = DockStyle.Fill,
-            Multiline = true,
-            ScrollBars = ScrollBars.Both,
-            WordWrap = false,
-            AcceptsReturn = true,
-            AcceptsTab = true,
-            ShortcutsEnabled = true,
-            Font = new Font("Consolas", 10f)
-        };
+            _lblOrderExportSummaryEx.Text = "선택 주문을 체크하면 출고용 작업 메뉴가 열립니다.";
+            if (_itemOrderExportCopyEx != null) _itemOrderExportCopyEx.Enabled = false;
+            if (_itemOrderExportSaveEx != null) _itemOrderExportSaveEx.Enabled = false;
+            return;
+        }
+
+        var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
+        var validCount = rows.Count(row => !string.IsNullOrWhiteSpace(row.ProductCode));
+        var missingCount = rows.Count - validCount;
+        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건\n빈칸 건은 맨 위로 복사됩니다.";
+
+        if (_itemOrderExportCopyEx != null) _itemOrderExportCopyEx.Enabled = true;
+        if (_itemOrderExportSaveEx != null) _itemOrderExportSaveEx.Enabled = true;
     }
 
-    private void RefreshOutputs()
+    private void CopySelectedOrdersToClipboardEx()
     {
-        _txtSpreadsheet.Text = OrderExportFormatterEx.BuildSpreadsheetText(_rows);
-        _txtSql.Text = OrderExportFormatterEx.BuildSqlInsert(_rows, _txtTableName.Text);
+        var orders = GetCheckedPreviewOrdersEx();
+        if (orders.Count == 0)
+        {
+            MessageBox.Show(this, "복사할 주문이 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
+        var clipboardText = ShipmentRequestOrderExportFormatterEx.BuildClipboardText(rows);
+
+        try
+        {
+            Clipboard.SetText(clipboardText, TextDataFormat.UnicodeText);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"클립보드 복사에 실패했습니다.\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var missingCount = rows.Count(row => string.IsNullOrWhiteSpace(row.ProductCode));
+        var message = $"클립보드에 {rows.Count}건을 복사했습니다.\n구글 시트의 상품코드 셀부터 바로 붙여넣으면 됩니다.";
+        if (missingCount > 0)
+            message += $"\n공급사 상품명 빈칸 {missingCount}건은 맨 위로 올려뒀습니다.";
+
+        MessageBox.Show(this, message, "복사 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    private void SaveExcel()
+    private void SaveSelectedOrdersWorkbookEx()
     {
+        var orders = GetCheckedPreviewOrdersEx();
+        if (orders.Count == 0)
+        {
+            MessageBox.Show(this, "저장할 주문이 없습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         using var dialog = new SaveFileDialog
         {
             Filter = "Excel Workbook (*.xlsx)|*.xlsx",
             DefaultExt = "xlsx",
             AddExtension = true,
-            FileName = $"cafe24_selected_orders_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx"
+            FileName = $"cafe24_selected_orders_{CurrentOrderExportDateValueEx:yyyyMMdd}_출고용.xlsx"
         };
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        using var workbook = new XLWorkbook();
-        var sheet = workbook.Worksheets.Add("selected_orders");
-        OrderExportFormatterEx.WriteWorksheet(sheet, _rows);
-        workbook.SaveAs(dialog.FileName);
-
-        MessageBox.Show(this, $"엑셀 파일을 저장했습니다.\n{dialog.FileName}", "저장 완료",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        ShipmentRequestOrderExportFormatterEx.SaveAsWorkbook(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx, dialog.FileName);
+        MessageBox.Show(this, $"출고용 엑셀 파일을 저장했습니다.\n{dialog.FileName}", "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
-}
 
-internal sealed class OrderExportRowEx
+    private string CurrentOrderExportMarketNameEx => string.IsNullOrWhiteSpace(_cboOrderExportMarketEx?.Text)
+        ? ShipmentRequestOrderExportFormatterEx.DefaultMarketName
+        : _cboOrderExportMarketEx.Text.Trim();
+
+    private DateTime CurrentOrderExportDateValueEx => _dtpOrderExportDateEx?.Value ?? DateTime.Today;
+
+    private string CurrentOrderExportDateTextEx => CurrentOrderExportDateValueEx.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+}
+internal sealed class ShipmentRequestOrderRowEx
 {
-    public string OrderId { get; init; } = "";
-    public string OrderItemCode { get; init; } = "";
-    public string OrderDate { get; init; } = "";
-    public string OrderStatus { get; init; } = "";
-    public string ProductName { get; init; } = "";
+    public string ProductCode { get; init; } = string.Empty;
+    public string MarketName { get; init; } = string.Empty;
+    public string ExportDate { get; init; } = string.Empty;
     public int Quantity { get; init; }
-    public decimal OrderAmount { get; init; }
-    public string RecipientName { get; init; } = "";
-    public string RecipientCellPhone { get; init; } = "";
-    public string RecipientPhone { get; init; } = "";
-    public string ShippingCode { get; init; } = "";
-
-    public static OrderExportRowEx FromOrder(Cafe24Order order)
-    {
-        return new OrderExportRowEx
-        {
-            OrderId = order.OrderId,
-            OrderItemCode = order.OrderItemCode,
-            OrderDate = order.OrderDate,
-            OrderStatus = order.OrderStatus,
-            ProductName = order.ProductName,
-            Quantity = order.Quantity,
-            OrderAmount = order.OrderAmount,
-            RecipientName = order.RecipientName,
-            RecipientCellPhone = order.RecipientCellPhone,
-            RecipientPhone = order.RecipientPhone,
-            ShippingCode = order.ShippingCode
-        };
-    }
+    public string RecipientName { get; init; } = string.Empty;
+    public string RecipientPhone { get; init; } = string.Empty;
+    public string PostalCode { get; init; } = string.Empty;
+    public string FullAddress { get; init; } = string.Empty;
+    public string ShippingMessage { get; init; } = string.Empty;
+    public string DetailAddress { get; init; } = string.Empty;
 }
 
-internal static class OrderExportFormatterEx
+internal static class ShipmentRequestOrderExportFormatterEx
 {
-    private static readonly string[] SpreadsheetHeaders =
+    public const string DefaultMarketName = "홈런마켓";
+
+    private static readonly string[] Headers =
     {
-        "주문번호",
-        "주문상품코드",
-        "주문일시",
-        "주문상태",
-        "상품명",
+        "공급사 상품명(매입상품명)",
+        "상품옵션",
+        " ",
         "수량",
-        "상품금액",
-        "수령인명",
-        "휴대폰",
-        "일반전화",
-        "배송코드"
+        "수령인",
+        "수령인 휴대전화",
+        "수령인 우편번호",
+        "수령인 주소",
+        "배송메시지",
+        "수령인 상세 주소"
     };
 
-    public static string BuildSpreadsheetText(IReadOnlyList<OrderExportRowEx> rows)
+    private static readonly Regex OptionLetterRegex = new("=\\s*([A-Za-z])", RegexOptions.Compiled);
+    private static readonly Regex ProductCodeRegex = new("\\b([A-Z]{2,}\\d+[A-Z])\\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    public static DateTime ResolveDefaultDate(IEnumerable<Cafe24Order> orders)
+    {
+        var parsed = orders
+            .Select(order => TryParseOrderDate(order.OrderDate))
+            .Where(value => value.HasValue)
+            .Select(value => value!.Value.Date)
+            .ToList();
+
+        return parsed.Count > 0 ? parsed.Max() : DateTime.Today;
+    }
+
+    public static IReadOnlyList<ShipmentRequestOrderRowEx> BuildRows(IEnumerable<Cafe24Order> orders, string marketName, string orderDateText)
+    {
+        var builtRows = orders.Select(order => BuildRow(order, marketName, orderDateText)).ToList();
+        var blankRows = builtRows.Where(row => string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
+        var normalRows = builtRows.Where(row => !string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
+        return blankRows.Concat(normalRows).ToList();
+    }
+
+    public static string BuildPreview(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    {
+        return BuildDelimitedText(rows, includeHeaders: true);
+    }
+
+    public static string BuildClipboardText(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    {
+        return BuildDelimitedText(rows, includeHeaders: false);
+    }
+
+    public static void SaveAsWorkbook(IEnumerable<Cafe24Order> orders, string marketName, string orderDateText, string filePath)
+    {
+        var rows = BuildRows(orders, marketName, orderDateText).ToList();
+
+        using var workbook = new XLWorkbook();
+        var sheet = workbook.Worksheets.Add("Sheet1");
+        WriteWorksheet(sheet, rows);
+        workbook.SaveAs(filePath);
+    }
+
+    public static DateTime? TryParseOrderDate(string value)
+    {
+        if (DateTimeOffset.TryParse(value, out var dto))
+            return dto.LocalDateTime;
+        if (DateTime.TryParse(value, out var dt))
+            return dt;
+        return null;
+    }
+
+    private static string BuildDelimitedText(IReadOnlyList<ShipmentRequestOrderRowEx> rows, bool includeHeaders)
     {
         var sb = new StringBuilder();
-        sb.AppendLine(string.Join("\t", SpreadsheetHeaders));
+        if (includeHeaders)
+            sb.AppendLine(string.Join("\t", Headers));
 
         foreach (var row in rows)
+            sb.AppendLine(string.Join("\t", BuildValues(row)));
+
+        return sb.ToString().TrimEnd('\r', '\n');
+    }
+
+    private static string[] BuildValues(ShipmentRequestOrderRowEx row)
+    {
+        return new[]
         {
-            var values = new[]
+            Clean(row.ProductCode),
+            Clean(row.MarketName),
+            Clean(row.ExportDate),
+            row.Quantity.ToString(CultureInfo.InvariantCulture),
+            Clean(row.RecipientName),
+            Clean(row.RecipientPhone),
+            Clean(row.PostalCode),
+            Clean(row.FullAddress),
+            Clean(row.ShippingMessage),
+            Clean(row.DetailAddress)
+        };
+    }
+
+    private static ShipmentRequestOrderRowEx BuildRow(Cafe24Order order, string marketName, string orderDateText)
+    {
+        var orderJson = ParseOrderJson(order.RawJson);
+        var receiver = SelectReceiver(orderJson, order);
+        var item = SelectItem(orderJson, order);
+
+        var optionText = ResolveOptionText(item);
+        var baseProductCode = ResolveBaseProductCode(item, order);
+        var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+
+        var detailAddress = receiver?["address2"]?.ToString() ?? string.Empty;
+        var fullAddress = CombineAddress(
+            receiver?["address1"]?.ToString() ?? string.Empty,
+            detailAddress,
+            receiver?["address_full"]?.ToString() ?? string.Empty);
+
+        return new ShipmentRequestOrderRowEx
+        {
+            ProductCode = finalProductCode,
+            MarketName = marketName,
+            ExportDate = orderDateText,
+            Quantity = order.Quantity,
+            RecipientName = receiver?["name"]?.ToString() ?? order.RecipientName,
+            RecipientPhone = ResolveRecipientPhone(receiver, order),
+            PostalCode = receiver?["zipcode"]?.ToString() ?? string.Empty,
+            FullAddress = fullAddress,
+            ShippingMessage = receiver?["shipping_message"]?.ToString() ?? string.Empty,
+            DetailAddress = detailAddress
+        };
+    }
+
+    private static JObject? ParseOrderJson(string rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson)) return null;
+        try
+        {
+            return JObject.Parse(rawJson);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static JObject? SelectReceiver(JObject? orderJson, Cafe24Order order)
+    {
+        var receivers = orderJson?["receivers"] as JArray;
+        if (receivers == null || receivers.Count == 0) return null;
+
+        return receivers
+            .OfType<JObject>()
+            .FirstOrDefault(receiver => string.Equals(receiver["shipping_code"]?.ToString(), order.ShippingCode, StringComparison.OrdinalIgnoreCase))
+            ?? receivers.OfType<JObject>().FirstOrDefault();
+    }
+
+    private static JObject? SelectItem(JObject? orderJson, Cafe24Order order)
+    {
+        var items = orderJson?["items"] as JArray;
+        if (items == null || items.Count == 0) return null;
+
+        return items
+            .OfType<JObject>()
+            .FirstOrDefault(item => string.Equals(item["order_item_code"]?.ToString(), order.OrderItemCode, StringComparison.OrdinalIgnoreCase))
+            ?? items.OfType<JObject>().FirstOrDefault();
+    }
+
+    private static string ResolveOptionText(JObject? item)
+    {
+        var direct = item?["option_value"]?.ToString()
+                     ?? item?["option_value_default"]?.ToString();
+        if (!string.IsNullOrWhiteSpace(direct))
+            return direct;
+
+        var options = item?["options"] as JArray;
+        if (options == null || options.Count == 0)
+            return string.Empty;
+
+        var parts = options
+            .OfType<JObject>()
+            .Select(option =>
             {
-                CleanCell(row.OrderId),
-                CleanCell(row.OrderItemCode),
-                CleanCell(row.OrderDate),
-                CleanCell(row.OrderStatus),
-                CleanCell(row.ProductName),
-                row.Quantity.ToString(CultureInfo.InvariantCulture),
-                row.OrderAmount.ToString("0.##", CultureInfo.InvariantCulture),
-                CleanCell(row.RecipientName),
-                CleanCell(row.RecipientCellPhone),
-                CleanCell(row.RecipientPhone),
-                CleanCell(row.ShippingCode)
-            };
-            sb.AppendLine(string.Join("\t", values));
-        }
+                var name = option["option_name"]?.ToString() ?? string.Empty;
+                var text = option["option_value"]?["option_text"]?.ToString()
+                           ?? option["option_value"]?.ToString()
+                           ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(name)) return text;
+                if (string.IsNullOrWhiteSpace(text)) return name;
+                return $"{name}={text}";
+            })
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .ToList();
 
-        return sb.ToString().TrimEnd();
+        return string.Join(" / ", parts);
     }
 
-    public static string BuildSqlInsert(IReadOnlyList<OrderExportRowEx> rows, string tableName)
+    private static string ResolveBaseProductCode(JObject? item, Cafe24Order order)
     {
-        var sb = new StringBuilder();
-        var targetTable = SanitizeSqlIdentifier(tableName);
+        var customProductCode = item?["custom_product_code"]?.ToString();
+        if (!string.IsNullOrWhiteSpace(customProductCode))
+            return customProductCode.Trim().ToUpperInvariant();
 
-        sb.AppendLine($"INSERT INTO {targetTable} (");
-        sb.AppendLine("    order_id,");
-        sb.AppendLine("    order_item_code,");
-        sb.AppendLine("    order_date,");
-        sb.AppendLine("    order_status,");
-        sb.AppendLine("    product_name,");
-        sb.AppendLine("    quantity,");
-        sb.AppendLine("    order_amount,");
-        sb.AppendLine("    recipient_name,");
-        sb.AppendLine("    recipient_cellphone,");
-        sb.AppendLine("    recipient_phone,");
-        sb.AppendLine("    shipping_code");
-        sb.AppendLine(") VALUES");
-
-        for (int i = 0; i < rows.Count; i++)
+        foreach (var candidate in new[]
         {
-            var row = rows[i];
-            sb.Append("    (");
-            sb.Append(SqlString(row.OrderId));
-            sb.Append(", ");
-            sb.Append(SqlString(row.OrderItemCode));
-            sb.Append(", ");
-            sb.Append(SqlString(row.OrderDate));
-            sb.Append(", ");
-            sb.Append(SqlString(row.OrderStatus));
-            sb.Append(", ");
-            sb.Append(SqlString(row.ProductName));
-            sb.Append(", ");
-            sb.Append(row.Quantity.ToString(CultureInfo.InvariantCulture));
-            sb.Append(", ");
-            sb.Append(row.OrderAmount.ToString("0.##", CultureInfo.InvariantCulture));
-            sb.Append(", ");
-            sb.Append(SqlString(row.RecipientName));
-            sb.Append(", ");
-            sb.Append(SqlString(row.RecipientCellPhone));
-            sb.Append(", ");
-            sb.Append(SqlString(row.RecipientPhone));
-            sb.Append(", ");
-            sb.Append(SqlString(row.ShippingCode));
-            sb.Append(')');
-            sb.AppendLine(i < rows.Count - 1 ? "," : ";");
+            item?["supplier_product_name"]?.ToString(),
+            item?["product_name"]?.ToString(),
+            order.ProductName
+        })
+        {
+            var extracted = ExtractProductCode(candidate);
+            if (!string.IsNullOrWhiteSpace(extracted))
+                return extracted;
         }
 
-        return sb.ToString();
+        return string.Empty;
     }
 
-    public static void WriteWorksheet(IXLWorksheet sheet, IReadOnlyList<OrderExportRowEx> rows)
+    private static string ExtractProductCode(string? text)
     {
-        for (int col = 0; col < SpreadsheetHeaders.Length; col++)
-            sheet.Cell(1, col + 1).Value = SpreadsheetHeaders[col];
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        var match = ProductCodeRegex.Match(text);
+        return match.Success ? match.Groups[1].Value.ToUpperInvariant() : string.Empty;
+    }
 
+    private static string ApplyOptionLetter(string baseProductCode, string optionText)
+    {
+        if (string.IsNullOrWhiteSpace(baseProductCode)) return string.Empty;
+
+        var normalized = baseProductCode.Trim().ToUpperInvariant();
+        var replacement = ExtractOptionLetter(optionText);
+        if (!string.IsNullOrWhiteSpace(replacement) && normalized.Length > 0 && char.IsLetter(normalized[^1]))
+            normalized = normalized[..^1] + replacement;
+
+        return normalized;
+    }
+
+    private static string? ExtractOptionLetter(string optionText)
+    {
+        if (string.IsNullOrWhiteSpace(optionText)) return null;
+        var match = OptionLetterRegex.Match(optionText);
+        return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+    }
+
+    private static string ResolveRecipientPhone(JObject? receiver, Cafe24Order order)
+    {
+        return receiver?["cellphone"]?.ToString()
+               ?? receiver?["phone"]?.ToString()
+               ?? order.RecipientCellPhone
+               ?? order.RecipientPhone
+               ?? string.Empty;
+    }
+
+    private static string CombineAddress(string address1, string detailAddress, string addressFull)
+    {
+        var first = Clean(address1);
+        var second = Clean(detailAddress);
+        if (first.Length > 0 && second.Length > 0)
+            return $"{first} {second}";
+        if (first.Length > 0)
+            return first;
+        if (second.Length > 0)
+            return second;
+        return Clean(addressFull);
+    }
+
+    private static void WriteWorksheet(IXLWorksheet sheet, IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    {
+        for (int col = 0; col < Headers.Length; col++)
+            sheet.Cell(1, col + 1).Value = Headers[col];
+
+        var blankCount = 0;
         for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
         {
             var row = rows[rowIndex];
             var excelRow = rowIndex + 2;
+            if (string.IsNullOrWhiteSpace(row.ProductCode)) blankCount++;
 
-            sheet.Cell(excelRow, 1).Value = row.OrderId;
-            sheet.Cell(excelRow, 2).Value = row.OrderItemCode;
-            sheet.Cell(excelRow, 3).Value = row.OrderDate;
-            sheet.Cell(excelRow, 4).Value = row.OrderStatus;
-            sheet.Cell(excelRow, 5).Value = row.ProductName;
-            sheet.Cell(excelRow, 6).Value = row.Quantity;
-            sheet.Cell(excelRow, 7).Value = row.OrderAmount;
-            sheet.Cell(excelRow, 8).Value = row.RecipientName;
-            sheet.Cell(excelRow, 9).Value = row.RecipientCellPhone;
-            sheet.Cell(excelRow, 10).Value = row.RecipientPhone;
-            sheet.Cell(excelRow, 11).Value = row.ShippingCode;
+            sheet.Cell(excelRow, 1).Value = row.ProductCode;
+            sheet.Cell(excelRow, 2).Value = row.MarketName;
+            sheet.Cell(excelRow, 3).Value = row.ExportDate;
+            sheet.Cell(excelRow, 4).Value = row.Quantity;
+            sheet.Cell(excelRow, 5).Value = row.RecipientName;
+            sheet.Cell(excelRow, 6).Value = row.RecipientPhone;
+            if (int.TryParse(row.PostalCode, out var zipcode))
+                sheet.Cell(excelRow, 7).Value = zipcode;
+            else
+                sheet.Cell(excelRow, 7).Value = row.PostalCode;
+            sheet.Cell(excelRow, 8).Value = row.FullAddress;
+            sheet.Cell(excelRow, 9).Value = string.IsNullOrWhiteSpace(row.ShippingMessage) ? null : row.ShippingMessage;
+            sheet.Cell(excelRow, 10).Value = row.DetailAddress;
         }
 
-        var headerRange = sheet.Range(1, 1, 1, SpreadsheetHeaders.Length);
-        headerRange.Style.Font.Bold = true;
-        headerRange.Style.Fill.BackgroundColor = XLColor.LightGray;
-        sheet.SheetView.FreezeRows(1);
+        if (blankCount > 0)
+        {
+            var blankRange = sheet.Range(2, 1, blankCount + 1, Headers.Length);
+            blankRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9D9D9");
+        }
+
         sheet.Columns().AdjustToContents();
     }
 
-    private static string CleanCell(string value)
+    private static string Clean(string? value)
     {
         return (value ?? string.Empty)
             .Replace("\r", " ")
@@ -468,19 +667,6 @@ internal static class OrderExportFormatterEx
             .Replace("\t", " ")
             .Trim();
     }
-
-    private static string SqlString(string value)
-    {
-        return $"'{CleanCell(value).Replace("'", "''")}'";
-    }
-
-    private static string SanitizeSqlIdentifier(string value)
-    {
-        var cleaned = new string((value ?? string.Empty)
-            .Trim()
-            .Select(ch => char.IsLetterOrDigit(ch) || ch == '_' ? ch : '_')
-            .ToArray());
-
-        return string.IsNullOrWhiteSpace(cleaned) ? "your_table_name" : cleaned;
-    }
 }
+
+
