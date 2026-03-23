@@ -535,6 +535,7 @@ public partial class MainForm : Form
         dgvData.Columns.Add("Name", "수령인명");
         dgvData.Columns.Add("Phone", "전화번호");
         dgvData.Columns.Add("OrderStatus", "주문상태");
+        dgvData.Columns.Add(OrderProgressColumnNameEx, "진행사항");
 
         dgvData.Columns[OrderSelectColumnNameEx]!.Width = 50;
         dgvData.Columns["No"]!.Width = 40;
@@ -545,13 +546,14 @@ public partial class MainForm : Form
         dgvData.Columns["Name"]!.Width = 75;
         dgvData.Columns["Phone"]!.Width = 110;
         dgvData.Columns["OrderStatus"]!.Width = 80;
+        dgvData.Columns[OrderProgressColumnNameEx]!.Width = 80;
 
         for (int i = 0; i < _cafe24Orders.Count; i++)
         {
             var o = _cafe24Orders[i];
             var phone = string.IsNullOrWhiteSpace(o.RecipientCellPhone) ? o.RecipientPhone : o.RecipientCellPhone;
             var rowIndex = dgvData.Rows.Add(false, i + 1, o.OrderId, o.OrderDate, o.ProductName,
-                o.Quantity, o.RecipientName, phone, o.OrderStatus);
+                o.Quantity, o.RecipientName, phone, o.OrderStatus, "조회완료");
             dgvData.Rows[rowIndex].Tag = o;
         }
 
@@ -814,6 +816,7 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
+
 
 
 

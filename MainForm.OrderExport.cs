@@ -10,6 +10,7 @@ namespace Cafe24ShipmentManager;
 public partial class MainForm
 {
     private const string OrderSelectColumnNameEx = "OrderSelectedEx";
+    private const string OrderProgressColumnNameEx = "OrderProgressEx";
 
     private Button? _btnOrderSelectAllEx;
     private Button? _btnOrderDeselectAllEx;
@@ -222,6 +223,18 @@ public partial class MainForm
         return value is bool flag && flag;
     }
 
+    private void MarkCheckedPreviewOrdersAsCopiedEx()
+    {
+        if (!dgvData.Columns.Contains(OrderProgressColumnNameEx)) return;
+
+        foreach (DataGridViewRow row in dgvData.Rows)
+        {
+            if (row.IsNewRow) continue;
+            if (!IsPreviewOrderCheckedEx(row)) continue;
+            row.Cells[OrderProgressColumnNameEx].Value = "복사완료";
+        }
+    }
+
     private void UpdateOrderSelectionSummaryEx()
     {
         if (_lblOrderSelectionEx == null) return;
@@ -307,6 +320,8 @@ public partial class MainForm
             MessageBox.Show(this, $"클립보드 복사에 실패했습니다.\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
+
+        MarkCheckedPreviewOrdersAsCopiedEx();
 
         var missingCount = rows.Count(row => string.IsNullOrWhiteSpace(row.ProductCode));
         var message = $"클립보드에 {rows.Count}건을 복사했습니다.\n구글 시트의 상품코드 셀부터 바로 붙여넣으면 됩니다.";
@@ -668,5 +683,6 @@ internal static class ShipmentRequestOrderExportFormatterEx
             .Trim();
     }
 }
+
 
 
