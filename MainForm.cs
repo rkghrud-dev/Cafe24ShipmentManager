@@ -685,6 +685,25 @@ public partial class MainForm : Form
         }
     }
 
+    private ShipmentSourceRow? FindSourceRowForMatch(MatchResult matchResult)
+    {
+        if (matchResult.SourceRowId > 0)
+        {
+            var byId = _filteredRows.FirstOrDefault(r => r.Id == matchResult.SourceRowId);
+            if (byId != null) return byId;
+        }
+
+        if (string.IsNullOrWhiteSpace(matchResult.SourceTracking))
+            return null;
+
+        return _filteredRows.FirstOrDefault(r =>
+            string.Equals(r.TrackingNumber, matchResult.SourceTracking, StringComparison.OrdinalIgnoreCase) &&
+            (string.IsNullOrWhiteSpace(matchResult.SourcePhone) ||
+             string.Equals(r.RecipientPhone, matchResult.SourcePhone, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrWhiteSpace(matchResult.SourceName) ||
+             string.Equals(r.RecipientName, matchResult.SourceName, StringComparison.OrdinalIgnoreCase)));
+    }
+
     // ═══════════════════════════════════════
     // 반영 실행
     // ═══════════════════════════════════════
@@ -728,9 +747,17 @@ public partial class MainForm : Form
         int ok = 0, fail = 0;
         foreach (var mr in confirmed)
         {
-            var src = _filteredRows.FirstOrDefault(r => r.Id == mr.SourceRowId);
-            var tracking = src?.TrackingNumber ?? "";
+            var src = FindSourceRowForMatch(mr);
+            var tracking = !string.IsNullOrWhiteSpace(mr.SourceTracking) ? mr.SourceTracking : src?.TrackingNumber ?? "";
             var code = !string.IsNullOrEmpty(src?.ShippingCompany) ? ResolveShipCode(src.ShippingCompany) : shipCode;
+            var sourceRowId = src?.Id ?? mr.SourceRowId;
+
+            if (src != null &&
+                !string.IsNullOrWhiteSpace(mr.SourceTracking) &&
+                !string.Equals(src.TrackingNumber, mr.SourceTracking, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn($"송장 원본 불일치 감지: SourceRowId={mr.SourceRowId}, Match={mr.SourceTracking}, Source={src.TrackingNumber}. 매칭 송장번호를 사용합니다.");
+            }
 
             if (string.IsNullOrEmpty(tracking)) { dgvResult.Rows.Add(mr.Cafe24OrderId, "", "SKIP", "송장번호 없음"); continue; }
 
@@ -748,7 +775,8 @@ public partial class MainForm : Form
 
             var ns = success ? "pushed" : "push_failed";
             _db.UpdateMatchStatus(mr.Id, ns, true);
-            _db.UpdateSourceRowStatus(mr.SourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
+            if (sourceRowId > 0)
+                _db.UpdateSourceRowStatus(sourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
 
             var idx = dgvResult.Rows.Add(mr.Cafe24OrderId, tracking,
                 success ? "✅ 성공" : $"❌ 실패 ({status})", resp.Length > 200 ? resp[..200] : resp);
@@ -816,9 +844,4 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
-
-
-
-
-
 

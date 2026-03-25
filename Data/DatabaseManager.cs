@@ -146,12 +146,17 @@ public class DatabaseManager
     public long InsertSourceRow(ShipmentSourceRow row)
     {
         using var conn = GetConnection();
-        return conn.ExecuteScalar<long>(@"
+        conn.Execute(@"
             INSERT OR IGNORE INTO shipment_source_rows
                 (SourceRowKey, VendorName, TrackingNumber, RecipientPhone, RecipientName, ProductCode, OrderDate, ShippingCompany, RawData, ProcessStatus, ImportedAt)
             VALUES
-                (@SourceRowKey, @VendorName, @TrackingNumber, @RecipientPhone, @RecipientName, @ProductCode, @OrderDate, @ShippingCompany, @RawData, @ProcessStatus, @ImportedAt);
-            SELECT last_insert_rowid();", row);
+                (@SourceRowKey, @VendorName, @TrackingNumber, @RecipientPhone, @RecipientName, @ProductCode, @OrderDate, @ShippingCompany, @RawData, @ProcessStatus, @ImportedAt);", row);
+
+        row.Id = conn.ExecuteScalar<long>(
+            "SELECT Id FROM shipment_source_rows WHERE SourceRowKey = @SourceRowKey",
+            new { row.SourceRowKey });
+
+        return row.Id;
     }
 
     /// <summary>
@@ -164,22 +169,16 @@ public class DatabaseManager
 
         foreach (var row in rows)
         {
-            var id = conn.ExecuteScalar<long>(@"
+            conn.Execute(@"
                 INSERT OR IGNORE INTO shipment_source_rows
                     (SourceRowKey, VendorName, TrackingNumber, RecipientPhone, RecipientName, ProductCode, OrderDate, ShippingCompany, RawData, ProcessStatus, ImportedAt)
                 VALUES
-                    (@SourceRowKey, @VendorName, @TrackingNumber, @RecipientPhone, @RecipientName, @ProductCode, @OrderDate, @ShippingCompany, @RawData, @ProcessStatus, @ImportedAt);
-                SELECT last_insert_rowid();", row, transaction: tx);
+                    (@SourceRowKey, @VendorName, @TrackingNumber, @RecipientPhone, @RecipientName, @ProductCode, @OrderDate, @ShippingCompany, @RawData, @ProcessStatus, @ImportedAt);",
+                row, transaction: tx);
 
-            if (id > 0)
-                row.Id = id;
-            else
-            {
-                var existingId = conn.ExecuteScalar<long?>(
-                    "SELECT Id FROM shipment_source_rows WHERE SourceRowKey = @SourceRowKey",
-                    new { row.SourceRowKey }, transaction: tx);
-                if (existingId.HasValue) row.Id = existingId.Value;
-            }
+            row.Id = conn.ExecuteScalar<long>(
+                "SELECT Id FROM shipment_source_rows WHERE SourceRowKey = @SourceRowKey",
+                new { row.SourceRowKey }, transaction: tx);
         }
 
         tx.Commit();
@@ -482,5 +481,4 @@ public class DatabaseManager
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 }
-
 
