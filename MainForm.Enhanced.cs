@@ -11,6 +11,10 @@ public partial class MainForm
     private const string FavoriteVendorPrefix = "★ ";
     private const string EnhancedStockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
     private const int EnhancedStockDefaultSheetGid = 2073400281;
+    private const string ImportCostSpreadsheetIdEx = "1WgwLg_w-9Ssw7B7Dlue_cd3Kc_bR37ECBNhfwzE7dh8";
+    private const int ImportCostSheetGidEx = 681096171;
+    private const string ImportCostSheetFallbackNameEx = "수입목록";
+    private const string HomerunMarketSupplierEx = "홈런마켓";
 
     private CheckedListBox? _clbStockVendors;
     private Button? _btnStockSelectAll;
@@ -23,7 +27,7 @@ public partial class MainForm
 
     private readonly HashSet<string> _favoriteShipmentVendorsEx = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _favoriteStockVendorsEx = new(StringComparer.OrdinalIgnoreCase);
-    private HashSet<string> _visibleStockColumnsEx = new(new[] { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" });
+    private HashSet<string> _visibleStockColumnsEx = new(new[] { "A", "B", "C", "CY", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" });
     private DateTime _stockAlertMutedDateEx = DateTime.MinValue;
     private List<StockRowEx> _stockRowsEx = new();
     private bool _enhancedStockUiBuilt;
@@ -32,6 +36,10 @@ public partial class MainForm
     private HashSet<string> _discontinuedCodes = new(StringComparer.OrdinalIgnoreCase);
     private bool _stockDragSelecting;
     private int _stockDragStartRow = -1;
+    private int _editingStockRowIndexEx = -1;
+    private string _editingStockColumnNameEx = "";
+    private string _editingStockOriginalValueEx = "";
+    private bool _savingImportCostYuanEx;
 
     private void InitEnhancedState()
     {
@@ -225,7 +233,17 @@ public partial class MainForm
         dgvStock.ReadOnly = false;
         dgvStock.CellDoubleClick += (_, e) =>
         {
-            if (e.ColumnIndex >= 0 && dgvStock.Columns[e.ColumnIndex].Name == "Chk") return;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+
+            var columnName = dgvStock.Columns[e.ColumnIndex].Name;
+            if (columnName == "Chk") return;
+            if (columnName == "CY")
+            {
+                if (CanEditImportCostYuanCellEx(dgvStock.Rows[e.RowIndex]))
+                    dgvStock.BeginEdit(true);
+                return;
+            }
+
             OpenStockOrderDialogFromGrid(e.RowIndex);
         };
 
@@ -255,8 +273,33 @@ public partial class MainForm
         // 체크박스 외 컬럼은 읽기전용 처리
         dgvStock.CellBeginEdit += (_, e) =>
         {
-            if (e.ColumnIndex < 0 || dgvStock.Columns[e.ColumnIndex].Name != "Chk") e.Cancel = true;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            var columnName = dgvStock.Columns[e.ColumnIndex].Name;
+            if (columnName == "Chk")
+                return;
+
+            if (columnName == "CY")
+            {
+                if (_savingImportCostYuanEx || !CanEditImportCostYuanCellEx(dgvStock.Rows[e.RowIndex]))
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
+                _editingStockRowIndexEx = e.RowIndex;
+                _editingStockColumnNameEx = columnName;
+                _editingStockOriginalValueEx = dgvStock.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString() ?? "";
+                return;
+            }
+
+            e.Cancel = true;
         };
+        dgvStock.CellEndEdit += async (_, e) => await SaveEditedStockCellEx(e.RowIndex, e.ColumnIndex);
 
         var right = new Panel { Dock = DockStyle.Fill };
         right.Controls.Add(dgvStock);
@@ -289,6 +332,8 @@ public partial class MainForm
         {
             var raw = await Task.Run(() => _sheetsReader.ReadRawSheet(EnhancedStockSpreadsheetId, sheet.Title, 30000));
             _stockRowsEx = ParseStockRowsEx(raw);
+            var importCostLookup = await LoadImportCostYuanLookupEx();
+            ApplyImportCostYuanLookupEx(_stockRowsEx, importCostLookup);
             _db.ReplaceStockInventoryCache(_stockRowsEx.Select(r => new
             {
                 ProductCode = r.ProductCode,
@@ -404,7 +449,7 @@ public partial class MainForm
         };
         dgvStock.Columns.Add(chkCol);
 
-        var columns = new[] { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" }
+        var columns = new[] { "A", "B", "C", "CY", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" }
             .Where(c => _visibleStockColumnsEx.Contains(c)).ToList();
         if (columns.Count == 0) columns = new List<string> { "A", "B", "C", "M" };
 
@@ -415,11 +460,11 @@ public partial class MainForm
                 Name = c,
                 HeaderText = c switch
                 {
-                    "A" => "상품코드", "B" => "주문코드", "C" => "공급사", "D" => "수입가", "E" => "공급가",
+                    "A" => "상품코드", "B" => "주문코드", "C" => "공급사", "CY" => "수입가(위안)", "D" => "수입가", "E" => "공급가",
                     "F" => "소매가", "G" => "입고", "H" => "판매", "I" => "2달전", "J" => "1달전", "K" => "이달",
                     "M" => "재고", "N" => "구매링크", "O" => "옵션명", _ => c
                 },
-                ReadOnly = true
+                ReadOnly = c != "CY"
             };
             dgvStock.Columns.Add(col);
         }
@@ -436,6 +481,7 @@ public partial class MainForm
                     "A" => r.ProductCode,
                     "B" => r.OrderCode,
                     "C" => r.Supplier,
+                    "CY" => r.ImportCostYuanRaw,
                     "D" => FormatMoneyWithYuanEx(r.ImportCost, rate),
                     "E" => FormatMoneyWithYuanEx(r.SupplyPrice, rate),
                     "F" => FormatMoneyWithYuanEx(r.RetailPrice, rate),
@@ -452,6 +498,14 @@ public partial class MainForm
             }
             var idx = dgvStock.Rows.Add(vals.ToArray());
             dgvStock.Rows[idx].Tag = r;
+
+            if (columns.Contains("CY"))
+            {
+                var importCostCell = dgvStock.Rows[idx].Cells["CY"];
+                importCostCell.ReadOnly = !CanEditImportCostYuanCellEx(r);
+                if (CanEditImportCostYuanCellEx(r))
+                    importCostCell.Style.BackColor = Color.FromArgb(255, 253, 231);
+            }
 
             // 단종 상품 스타일
             if (_discontinuedCodes.Contains(r.ProductCode))
@@ -564,7 +618,7 @@ public partial class MainForm
         var lines = candidates.Select(r => new StockOrderLineEx
         {
             ProductCode = r.ProductCode,
-            ImportDetail = BuildDefaultImportDetail(baseRow.OrderCode, r.ProductCode, r.OptionName),
+            ImportDetail = BuildDefaultImportDetail(r.OrderCode, r.ProductCode, r.OptionName),
             OptionText = r.OptionName,
             CurrentStock = r.StockRaw,
             OrderQty = 0,
@@ -601,9 +655,20 @@ public partial class MainForm
     private static string BuildDefaultImportDetail(string baseName, string productCode, string optionText)
     {
         var name = (baseName ?? "").Trim();
+        var code = (productCode ?? "").Trim();
+
         if (!string.IsNullOrWhiteSpace(name))
-            return $"{name} {productCode}".Trim();
-        return $"{productCode}".Trim();
+        {
+            if (!string.IsNullOrWhiteSpace(code) &&
+                name.Contains(code, StringComparison.OrdinalIgnoreCase))
+                return name;
+
+            return string.IsNullOrWhiteSpace(code)
+                ? name
+                : $"{name} {code}".Trim();
+        }
+
+        return code;
     }
 
     private void ShowLowStockAlertEx()
@@ -621,7 +686,7 @@ public partial class MainForm
             .ToList();
         if (lows.Count == 0) return;
 
-        using var dlg = new Form { Text = "저재고 알림 (즐겨찾기 기준)", Size = new Size(760, 500), StartPosition = FormStartPosition.CenterParent };
+        using var dlg = new Form { Text = "저재고 알림 (즐겨찾기 기준)", Size = new Size(980, 500), StartPosition = FormStartPosition.CenterParent };
         var grid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -632,11 +697,13 @@ public partial class MainForm
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
         };
         grid.Columns.Add("A", "상품코드");
+        grid.Columns.Add("B", "상품명");
         grid.Columns.Add("C", "공급사");
         grid.Columns.Add("S", "3개월판매");
         grid.Columns.Add("M", "재고");
         grid.Columns.Add("O", "옵션명");
-        foreach (var r in lows) grid.Rows.Add(r.ProductCode, r.Supplier, r.ThreeMonthSales.ToString("N0"), r.StockRaw, r.OptionName);
+        foreach (var r in lows)
+            grid.Rows.Add(r.ProductCode, GetLowStockAlertProductNameEx(r), r.Supplier, r.ThreeMonthSales.ToString("N0"), r.StockRaw, r.OptionName);
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 42 };
         var chkMute = new CheckBox { Text = "오늘은 알람 안 울림", AutoSize = true, Location = new Point(8, 12) };
@@ -670,11 +737,158 @@ public partial class MainForm
         dlg.ShowDialog(this);
     }
 
+
+    private static string GetLowStockAlertProductNameEx(StockRowEx row)
+    {
+        if (!string.IsNullOrWhiteSpace(row.OrderCode))
+            return row.OrderCode;
+
+        return row.OptionName;
+    }
+    private async Task<Dictionary<string, ImportCostSheetEntryEx>> LoadImportCostYuanLookupEx()
+    {
+        if (_sheetsReader == null)
+            return new Dictionary<string, ImportCostSheetEntryEx>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var sheets = await Task.Run(() => _sheetsReader.GetSheetList(ImportCostSpreadsheetIdEx));
+            var sheetName = sheets.FirstOrDefault(s => s.sheetId == ImportCostSheetGidEx).title;
+            if (string.IsNullOrWhiteSpace(sheetName))
+                sheetName = sheets.FirstOrDefault(s => string.Equals(s.title, ImportCostSheetFallbackNameEx, StringComparison.OrdinalIgnoreCase)).title;
+            if (string.IsNullOrWhiteSpace(sheetName))
+                sheetName = ImportCostSheetFallbackNameEx;
+
+            var raw = await Task.Run(() => _sheetsReader.ReadRawSheet(ImportCostSpreadsheetIdEx, sheetName, 30000));
+            var lookup = new Dictionary<string, ImportCostSheetEntryEx>(StringComparer.OrdinalIgnoreCase);
+
+            for (int rowIndex = 0; rowIndex < raw.Rows.Count; rowIndex++)
+            {
+                var cells = raw.Rows[rowIndex];
+                var orderCode = GetCellEx(cells, 1);
+                if (string.IsNullOrWhiteSpace(orderCode))
+                    continue;
+
+                var key = NormalizeOrderCodeEx(orderCode);
+                if (lookup.ContainsKey(key))
+                    continue;
+
+                lookup[key] = new ImportCostSheetEntryEx
+                {
+                    SheetName = sheetName,
+                    RowNumber = rowIndex + 2,
+                    ImportCostYuanRaw = GetCellEx(cells, 6)
+                };
+            }
+
+            _log.Info($"수입목록 위안 수입가 로드: {lookup.Count}건");
+            return lookup;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"수입목록 위안 수입가 로드 실패: {ex.Message}");
+            return new Dictionary<string, ImportCostSheetEntryEx>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private void ApplyImportCostYuanLookupEx(IEnumerable<StockRowEx> rows, IReadOnlyDictionary<string, ImportCostSheetEntryEx> lookup)
+    {
+        var matched = 0;
+        var homerunRows = 0;
+
+        foreach (var row in rows)
+        {
+            row.ImportCostYuanRaw = "";
+            row.ImportCostSheetName = "";
+            row.ImportCostSheetRowNumber = 0;
+            if (!string.Equals(row.Supplier, HomerunMarketSupplierEx, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            homerunRows++;
+            var key = NormalizeOrderCodeEx(row.OrderCode);
+            if (key.Length == 0)
+                continue;
+
+            if (lookup.TryGetValue(key, out var entry))
+            {
+                row.ImportCostYuanRaw = entry.ImportCostYuanRaw;
+                row.ImportCostSheetName = entry.SheetName;
+                row.ImportCostSheetRowNumber = entry.RowNumber;
+                matched++;
+            }
+        }
+
+        _log.Info($"홈런마켓 위안 수입가 매칭: {matched}/{homerunRows}건");
+    }
+
+    private async Task SaveEditedStockCellEx(int rowIndex, int columnIndex)
+    {
+        if (rowIndex < 0 || columnIndex < 0)
+            return;
+        if (dgvStock.Columns[columnIndex].Name != "CY")
+            return;
+        if (_editingStockRowIndexEx != rowIndex || _editingStockColumnNameEx != "CY")
+            return;
+        if (dgvStock.Rows[rowIndex].Tag is not StockRowEx row)
+            return;
+
+        var cell = dgvStock.Rows[rowIndex].Cells[columnIndex];
+        var oldValue = _editingStockOriginalValueEx.Trim();
+        var newValue = (cell.Value?.ToString() ?? "").Trim();
+
+        _editingStockRowIndexEx = -1;
+        _editingStockColumnNameEx = "";
+        _editingStockOriginalValueEx = "";
+
+        cell.Value = newValue;
+        if (string.Equals(newValue, oldValue, StringComparison.Ordinal))
+            return;
+        if (_sheetsReader == null || !CanEditImportCostYuanCellEx(row))
+        {
+            cell.Value = oldValue;
+            return;
+        }
+
+        try
+        {
+            UseWaitCursor = true;
+            _savingImportCostYuanEx = true;
+            await Task.Run(() => _sheetsReader.UpdateCell(ImportCostSpreadsheetIdEx, row.ImportCostSheetName, $"G{row.ImportCostSheetRowNumber}", newValue));
+            row.ImportCostYuanRaw = newValue;
+            _log.Info($"수입가(위안) 저장 완료: {row.OrderCode} -> {newValue}");
+        }
+        catch (Exception ex)
+        {
+            cell.Value = oldValue;
+            row.ImportCostYuanRaw = oldValue;
+            _log.Error($"수입가(위안) 저장 실패: {row.OrderCode}", ex);
+            MessageBox.Show(this, $"수입가(위안) 저장 실패:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _savingImportCostYuanEx = false;
+            UseWaitCursor = false;
+        }
+    }
+
+    private static bool CanEditImportCostYuanCellEx(DataGridViewRow row)
+        => row.Tag is StockRowEx stockRow && CanEditImportCostYuanCellEx(stockRow);
+
+    private static bool CanEditImportCostYuanCellEx(StockRowEx? row)
+        => row != null
+        && string.Equals(row.Supplier, HomerunMarketSupplierEx, StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(row.ImportCostSheetName)
+        && row.ImportCostSheetRowNumber > 0;
+
+    private static string NormalizeOrderCodeEx(string? value) => (value ?? "").Trim();
+
+    private static string GetCellEx(List<string> cells, int index) => index < cells.Count ? cells[index] : "";
+
     private void OpenEnhancedStockColumnsDialog()
     {
         var all = new[]
         {
-            ("A", "상품코드"), ("B", "주문코드"), ("C", "공급사"), ("D", "수입가"), ("E", "공급가"),
+            ("A", "상품코드"), ("B", "주문코드"), ("C", "공급사"), ("CY", "수입가(위안)"), ("D", "수입가"), ("E", "공급가"),
             ("F", "소매가"), ("G", "입고"), ("H", "판매"), ("I", "2달전"), ("J", "1달전"), ("K", "이달"),
             ("M", "재고"), ("N", "구매링크"), ("O", "옵션명")
         };
@@ -825,7 +1039,9 @@ public partial class MainForm
             _favoriteStockVendorsEx.Clear();
             foreach (var x in st.FavoriteStockVendors ?? new List<string>()) _favoriteStockVendorsEx.Add(x);
 
-            _visibleStockColumnsEx = new HashSet<string>(st.VisibleStockColumns ?? new List<string> { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" });
+            _visibleStockColumnsEx = new HashSet<string>(st.VisibleStockColumns ?? new List<string> { "A", "B", "C", "CY", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" });
+            if (st.ImportCostYuanColumnInitialized != true)
+                _visibleStockColumnsEx.Add("CY");
             _loadedYuanRateEx = st.YuanRate ?? "320";
 
             if (DateTime.TryParse(st.StockAlertMutedDate, out var dt)) _stockAlertMutedDateEx = dt.Date;
@@ -843,7 +1059,8 @@ public partial class MainForm
                 FavoriteStockVendors = _favoriteStockVendorsEx.OrderBy(x => x).ToList(),
                 VisibleStockColumns = _visibleStockColumnsEx.ToList(),
                 StockAlertMutedDate = _stockAlertMutedDateEx == DateTime.MinValue ? "" : _stockAlertMutedDateEx.ToString("yyyy-MM-dd"),
-                YuanRate = _txtStockYuanRate?.Text ?? _loadedYuanRateEx
+                YuanRate = _txtStockYuanRate?.Text ?? _loadedYuanRateEx,
+                ImportCostYuanColumnInitialized = true
             };
             File.WriteAllText(GetEnhancedStatePath(), JsonConvert.SerializeObject(st, Formatting.Indented));
         }
@@ -858,11 +1075,21 @@ public partial class MainForm
         public override string ToString() => $"{Title} (gid:{SheetId})";
     }
 
+    private sealed class ImportCostSheetEntryEx
+    {
+        public string SheetName { get; set; } = "";
+        public int RowNumber { get; set; }
+        public string ImportCostYuanRaw { get; set; } = "";
+    }
+
     private sealed class StockRowEx
     {
         public string ProductCode { get; set; } = "";
         public string OrderCode { get; set; } = "";
         public string Supplier { get; set; } = "";
+        public string ImportCostSheetName { get; set; } = "";
+        public int ImportCostSheetRowNumber { get; set; }
+        public string ImportCostYuanRaw { get; set; } = "";
         public string ImportCostRaw { get; set; } = "";
         public string SupplyPriceRaw { get; set; } = "";
         public string RetailPriceRaw { get; set; } = "";
@@ -893,6 +1120,7 @@ public partial class MainForm
         public List<string>? VisibleStockColumns { get; set; }
         public string? StockAlertMutedDate { get; set; }
         public string? YuanRate { get; set; }
+        public bool? ImportCostYuanColumnInitialized { get; set; }
     }
 }
 
@@ -984,8 +1212,10 @@ public class StockOrderDialogEx : Form
         var top = new Panel { Dock = DockStyle.Top, Height = 34 };
         var lblBase = new Label { Text = $"기준코드(A): {baseCodeA}", AutoSize = true, Location = new Point(4, 9) };
         var lblUrl = new Label { Text = "사이트주소:", AutoSize = true, Location = new Point(330, 9) };
-        _txtSiteUrl = new TextBox { Text = siteUrl ?? "", Location = new Point(400, 5), Width = 690 };
-        top.Controls.AddRange(new Control[] { lblBase, lblUrl, _txtSiteUrl });
+        _txtSiteUrl = new TextBox { Text = siteUrl ?? "", Location = new Point(400, 5), Width = 500, Anchor = AnchorStyles.Top | AnchorStyles.Left };
+        var btnOpenSite = new Button { Text = "사이트열기", Width = 90, Height = 24, Location = new Point(910, 5), Anchor = AnchorStyles.Top | AnchorStyles.Left };
+        btnOpenSite.Click += (_, _) => OpenSiteUrl();
+        top.Controls.AddRange(new Control[] { lblBase, lblUrl, _txtSiteUrl, btnOpenSite });
 
         _grid = new DataGridView
         {
@@ -1155,6 +1385,40 @@ public class StockOrderDialogEx : Form
         _tabPaste.TabPages.Add(initPage);
 
         RebuildOutput();
+    }
+
+    private void OpenSiteUrl()
+    {
+        var rawUrl = (_txtSiteUrl.Text ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(rawUrl))
+        {
+            MessageBox.Show("사이트주소가 비어 있습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var url = rawUrl;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out _))
+        {
+            if (rawUrl.Contains("://", StringComparison.Ordinal))
+            {
+                MessageBox.Show("사이트주소 형식이 올바르지 않습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            url = "https://" + rawUrl;
+        }
+
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url)
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"사이트를 열 수 없습니다.\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void SaveStockOrder()

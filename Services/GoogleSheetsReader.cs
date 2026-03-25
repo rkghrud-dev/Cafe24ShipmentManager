@@ -43,7 +43,7 @@ public class GoogleSheetsReader
 
             credential = await GoogleWebAuthorizationBroker.AuthorizeAsync(
                 GoogleClientSecrets.FromStream(stream).Secrets,
-                new[] { SheetsService.Scope.SpreadsheetsReadonly },
+                new[] { SheetsService.Scope.Spreadsheets },
                 "user",
                 CancellationToken.None,
                 new FileDataStore(tokenPath, true));
@@ -313,8 +313,26 @@ public class GoogleSheetsReader
         _log.Info($"재고 시트 '{sheetName}' 로드: {result.Rows.Count}행");
         return result;
     }
-}
 
+    public void UpdateCell(string spreadsheetId, string sheetName, string a1Cell, string value)
+    {
+        var range = $"'{sheetName}'!{a1Cell}";
+        var body = new Google.Apis.Sheets.v4.Data.ValueRange
+        {
+            Values = new List<IList<object>>
+            {
+                new List<object> { value }
+            }
+        };
+
+        var request = _service.Spreadsheets.Values.Update(body, spreadsheetId, range);
+        request.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+        request.Execute();
+
+        _log.Info($"시트 값 업데이트: {sheetName} {a1Cell} = {value}");
+    }
+
+}
 public class RawSheetData
 {
     public List<string> Headers { get; set; } = new();
