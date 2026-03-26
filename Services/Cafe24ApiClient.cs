@@ -9,6 +9,7 @@ namespace Cafe24ShipmentManager.Services;
 
 public class Cafe24Config
 {
+    public string DisplayName { get; set; } = "";
     public string MallId { get; set; } = "";
     public string AccessToken { get; set; } = "";
     public string ClientId { get; set; } = "";
@@ -126,7 +127,7 @@ public class Cafe24ApiClient
             offset += limit;
         }
 
-        _log.Info($"Cafe24 주문 {orders.Count}건 조회 완료 ({startDate} ~ {endDate})");
+        _log.Info($"[{ResolveMarketDisplayName()}] Cafe24 주문 {orders.Count}건 조회 완료 ({startDate} ~ {endDate})");
         return orders;
     }
 
@@ -154,6 +155,8 @@ public class Cafe24ApiClient
 
         return new Cafe24Order
         {
+            MallId = _config.MallId,
+            MarketName = ResolveMarketDisplayName(),
             OrderId = orderId,
             OrderItemCode = item?["order_item_code"]?.ToString() ?? "",
             RecipientName = receiverName,
@@ -198,7 +201,7 @@ public class Cafe24ApiClient
             };
 
             var jsonPayload = JsonConvert.SerializeObject(payload);
-            _log.Info($"송장 반영 요청: {orderId} → {shipmentsUrl}, body={jsonPayload}");
+            _log.Info($"[{ResolveMarketDisplayName()}] 송장 반영 요청: {orderId} → {shipmentsUrl}, body={jsonPayload}");
 
             var resp = await ExecuteWithRetry(() =>
             {
@@ -214,15 +217,15 @@ public class Cafe24ApiClient
             var success = resp?.IsSuccessStatusCode ?? false;
 
             if (success)
-                _log.Info($"송장 반영 성공: {orderId} → {trackingNumber}");
+                _log.Info($"[{ResolveMarketDisplayName()}] 송장 반영 성공: {orderId} → {trackingNumber}");
             else
-                _log.Error($"송장 반영 실패: {orderId} → {statusCode}: {respBody}");
+                _log.Error($"[{ResolveMarketDisplayName()}] 송장 반영 실패: {orderId} → {statusCode}: {respBody}");
 
             return (success, respBody, statusCode);
         }
         catch (Exception ex)
         {
-            _log.Error($"송장 반영 예외: {orderId}", ex);
+            _log.Error($"[{ResolveMarketDisplayName()}] 송장 반영 예외: {orderId}", ex);
             return (false, ex.Message, 0);
         }
     }
@@ -503,6 +506,11 @@ public class Cafe24ApiClient
         return input; // 코드 직접 입력
     }
 
+    private string ResolveMarketDisplayName()
+    {
+        return string.IsNullOrWhiteSpace(_config.DisplayName) ? _config.MallId : _config.DisplayName;
+    }
+
     private void SaveTokensToConfig()
     {
         try
@@ -522,7 +530,20 @@ public class Cafe24ApiClient
                 json["Cafe24"] = cafe24;
             }
 
-            cafe24["TokenFilePath"] = _config.TokenFilePath;
+            var markets = cafe24["Markets"] as JArray;
+            if (markets != null && markets.Count > 0)
+            {
+                var marketConfig = FindOrCreateMarketConfigEntry(markets, _config);
+                marketConfig["DisplayName"] = ResolveMarketDisplayName();
+                marketConfig["MallId"] = _config.MallId;
+                marketConfig["TokenFilePath"] = _config.TokenFilePath;
+            }
+            else
+            {
+                cafe24["DisplayName"] = ResolveMarketDisplayName();
+                cafe24["TokenFilePath"] = _config.TokenFilePath;
+            }
+
             File.WriteAllText(configPath, json.ToString(Formatting.Indented));
         }
         catch (Exception ex)
@@ -530,5 +551,31 @@ public class Cafe24ApiClient
             _log.Warn($"공유 Cafe24 토큰 저장 실패: {ex.Message}");
         }
     }
-}
 
+    private static JObject FindOrCreateMarketConfigEntry(JArray markets, Cafe24Config config)
+    {
+        var target = markets
+            .OfType<JObject>()
+            .FirstOrDefault(item =>
+                string.Equals(ResolveComparablePath(item["TokenFilePath"]?.ToString()), ResolveComparablePath(config.TokenFilePath), StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(item["MallId"]?.ToString(), config.MallId, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(item["DisplayName"]?.ToString(), config.DisplayName, StringComparison.OrdinalIgnoreCase));
+
+        if (target != null)
+            return target;
+
+        target = new JObject();
+        markets.Add(target);
+        return target;
+    }
+
+    private static string ResolveComparablePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "";
+
+        var expandedPath = Environment.ExpandEnvironmentVariables(path);
+        return Path.IsPathRooted(expandedPath)
+            ? expandedPath
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
+    }
+}

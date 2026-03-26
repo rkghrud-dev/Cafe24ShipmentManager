@@ -11,9 +11,11 @@ public partial class MainForm : Form
     // ── Services ──
     private readonly DatabaseManager _db;
     private readonly AppLogger _log;
-    private readonly Cafe24ApiClient _api;
+    private readonly IReadOnlyList<Cafe24Config> _cafe24Configs;
+    private readonly Dictionary<string, Cafe24ApiClient> _apiByMallId;
+    private readonly Dictionary<string, Cafe24Config> _configByMallId;
     private readonly MatchingEngine _matcher;
-    private readonly Cafe24Config _cafe24Config;
+    private readonly Cafe24Config _primaryCafe24Config;
     private GoogleSheetsReader? _sheetsReader;
     private readonly string _credentialPath;
     private readonly string _spreadsheetId;
@@ -62,13 +64,20 @@ public partial class MainForm : Form
     // ── Log ──
     private TextBox txtLog = null!;
 
-    public MainForm(DatabaseManager db, AppLogger log, Cafe24Config cafe24Config,
+    public MainForm(DatabaseManager db, AppLogger log, IReadOnlyList<Cafe24Config> cafe24Configs,
                     string credentialPath, string spreadsheetId, string defaultSheetName)
     {
         _db = db;
         _log = log;
-        _cafe24Config = cafe24Config;
-        _api = new Cafe24ApiClient(cafe24Config, log);
+        _cafe24Configs = cafe24Configs
+            .Where(config => !string.IsNullOrWhiteSpace(config.MallId))
+            .ToList();
+        if (_cafe24Configs.Count == 0)
+            throw new InvalidOperationException("유효한 Cafe24 설정이 없습니다.");
+
+        _primaryCafe24Config = _cafe24Configs[0];
+        _configByMallId = _cafe24Configs.ToDictionary(config => config.MallId, StringComparer.OrdinalIgnoreCase);
+        _apiByMallId = _cafe24Configs.ToDictionary(config => config.MallId, config => new Cafe24ApiClient(config, log), StringComparer.OrdinalIgnoreCase);
         _matcher = new MatchingEngine(db, log);
         _credentialPath = credentialPath;
         _spreadsheetId = spreadsheetId;
@@ -95,6 +104,36 @@ public partial class MainForm : Form
         txtLog.AppendText(msg + Environment.NewLine);
         txtLog.SelectionStart = txtLog.TextLength;
         txtLog.ScrollToCaret();
+    }
+
+    private string ResolveMarketDisplayName(Cafe24Config config)
+    {
+        return string.IsNullOrWhiteSpace(config.DisplayName) ? config.MallId : config.DisplayName;
+    }
+
+    private static string ResolveMarketDisplayName(Cafe24Order order)
+    {
+        return string.IsNullOrWhiteSpace(order.MarketName) ? order.MallId : order.MarketName;
+    }
+
+    private static string ResolveMarketDisplayName(MatchResult matchResult)
+    {
+        return string.IsNullOrWhiteSpace(matchResult.Cafe24MarketName) ? matchResult.Cafe24MallId : matchResult.Cafe24MarketName;
+    }
+
+    private Cafe24ApiClient? FindApiClient(string mallId)
+    {
+        if (string.IsNullOrWhiteSpace(mallId)) return null;
+        return _apiByMallId.TryGetValue(mallId, out var api) ? api : null;
+    }
+
+    private static DateTime ParseOrderDateForSort(Cafe24Order order)
+    {
+        if (DateTimeOffset.TryParse(order.OrderDate, out var dto))
+            return dto.LocalDateTime;
+        if (DateTime.TryParse(order.OrderDate, out var dt))
+            return dt;
+        return DateTime.MinValue;
     }
 
     // ═══════════════════════════════════════
@@ -251,7 +290,7 @@ public partial class MainForm : Form
         dtpStart = new DateTimePicker
         {
             Location = new Point(75, 7), Width = 120, Format = DateTimePickerFormat.Short,
-            Value = DateTime.Now.AddDays(-_cafe24Config.OrderFetchDays)
+            Value = DateTime.Now.AddDays(-_primaryCafe24Config.OrderFetchDays)
         };
         var lblTo = new Label { Text = "~", Location = new Point(200, 11), AutoSize = true };
         dtpEnd = new DateTimePicker
@@ -463,10 +502,44 @@ public partial class MainForm : Form
             btnFetch.Enabled = false;
             btnFetch.Text = "Cafe24 조회 중...";
 
-            // ① Cafe24 배송준비중 주문 수집
-            var progress = new Progress<string>(msg => _log.Info(msg));
-            _cafe24Orders = await _api.FetchRecentOrders(
-                dtpStart.Value, dtpEnd.Value, progress, orderStatus: "N20");
+            var mergedOrders = new List<Cafe24Order>();
+            var marketSummaries = new List<string>();
+
+            foreach (var config in _cafe24Configs)
+            {
+                var marketName = ResolveMarketDisplayName(config);
+                btnFetch.Text = $"{marketName} 조회 중...";
+
+                var api = FindApiClient(config.MallId);
+                if (api == null)
+                {
+                    _log.Warn($"[{marketName}] API 클라이언트를 찾지 못해 조회를 건너뜁니다.");
+                    continue;
+                }
+
+                try
+                {
+                    var progress = new Progress<string>(msg => _log.Info($"[{marketName}] {msg}"));
+                    var orders = await api.FetchRecentOrders(dtpStart.Value, dtpEnd.Value, progress, orderStatus: "N20");
+                    foreach (var order in orders)
+                    {
+                        order.MallId = config.MallId;
+                        order.MarketName = marketName;
+                    }
+
+                    mergedOrders.AddRange(orders);
+                    marketSummaries.Add($"{marketName} {orders.Count}건");
+                }
+                catch (Exception ex)
+                {
+                    _log.Error($"[{marketName}] Cafe24 주문 조회 실패", ex);
+                }
+            }
+
+            _cafe24Orders = mergedOrders
+                .OrderByDescending(ParseOrderDateForSort)
+                .ThenBy(order => order.OrderId, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             if (_cafe24Orders.Count == 0)
             {
@@ -476,17 +549,18 @@ public partial class MainForm : Form
                 return;
             }
 
-            // DB 캐시 갱신
             _db.ClearOrderCache();
-            foreach (var o in _cafe24Orders)
-                _db.InsertOrderCache(o);
+            foreach (var order in _cafe24Orders)
+                _db.InsertOrderCache(order);
 
-            // ② 데이터 프리뷰에 Cafe24 주문 표시
             ShowDataPreview();
 
-            lblStatus.Text = $"✅ Cafe24 배송준비중 주문 {_cafe24Orders.Count}건 조회 완료";
+            var summary = string.Join(" / ", marketSummaries);
+            lblStatus.Text = $"✅ 배송준비중 주문 {_cafe24Orders.Count}건 조회 완료" +
+                             (string.IsNullOrWhiteSpace(summary) ? "" : $" ({summary})");
             lblStatus.ForeColor = Color.DarkGreen;
-            _log.Info($"Cafe24 배송준비중 주문 {_cafe24Orders.Count}건 캐시 완료");
+            _log.Info($"Cafe24 배송준비중 주문 {_cafe24Orders.Count}건 캐시 완료" +
+                      (string.IsNullOrWhiteSpace(summary) ? "" : $" [{summary}]"));
 
             tabShipSub.SelectedIndex = 0;
         }
@@ -501,7 +575,6 @@ public partial class MainForm : Form
             btnFetch.Text = "📥 조회";
         }
     }
-
     private void ResetAll()
     {
         _excelResult = null;
@@ -529,6 +602,7 @@ public partial class MainForm : Form
 
         dgvData.Columns.Add("No", "#");
         dgvData.Columns.Add("OrderId", "주문번호");
+        dgvData.Columns.Add("Market", "마켓");
         dgvData.Columns.Add("OrderDate", "주문일");
         dgvData.Columns.Add("ProductName", "상품명");
         dgvData.Columns.Add("Qty", "수량");
@@ -540,8 +614,9 @@ public partial class MainForm : Form
         dgvData.Columns[OrderSelectColumnNameEx]!.Width = 50;
         dgvData.Columns["No"]!.Width = 40;
         dgvData.Columns["OrderId"]!.Width = 130;
+        dgvData.Columns["Market"]!.Width = 90;
         dgvData.Columns["OrderDate"]!.Width = 90;
-        dgvData.Columns["ProductName"]!.Width = 200;
+        dgvData.Columns["ProductName"]!.Width = 190;
         dgvData.Columns["Qty"]!.Width = 45;
         dgvData.Columns["Name"]!.Width = 75;
         dgvData.Columns["Phone"]!.Width = 110;
@@ -550,18 +625,16 @@ public partial class MainForm : Form
 
         for (int i = 0; i < _cafe24Orders.Count; i++)
         {
-            var o = _cafe24Orders[i];
-            var phone = string.IsNullOrWhiteSpace(o.RecipientCellPhone) ? o.RecipientPhone : o.RecipientCellPhone;
-            var rowIndex = dgvData.Rows.Add(false, i + 1, o.OrderId, o.OrderDate, o.ProductName,
-                o.Quantity, o.RecipientName, phone, o.OrderStatus, "조회완료");
-            dgvData.Rows[rowIndex].Tag = o;
+            var order = _cafe24Orders[i];
+            var phone = string.IsNullOrWhiteSpace(order.RecipientCellPhone) ? order.RecipientPhone : order.RecipientCellPhone;
+            var marketName = ResolveMarketDisplayName(order);
+            var rowIndex = dgvData.Rows.Add(false, i + 1, order.OrderId, marketName, order.OrderDate, order.ProductName,
+                order.Quantity, order.RecipientName, phone, order.OrderStatus, "조회완료");
+            dgvData.Rows[rowIndex].Tag = order;
         }
 
         UpdateOrderSelectionSummaryEx();
     }
-    // ═══════════════════════════════════════
-    // 매칭 실행
-    // ═══════════════════════════════════════
     private async Task ExecuteMatchingAsync()
     {
         if (_cafe24Orders.Count == 0) { MessageBox.Show("먼저 Cafe24 주문을 조회하세요.", "알림"); return; }
@@ -634,6 +707,7 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("SrcPhone", "출고-휴대폰");
         dgvMatch.Columns.Add("SrcName", "출고-수령인");
         dgvMatch.Columns.Add("SrcTracking", "송장번호");
+        dgvMatch.Columns.Add("Cafe24Market", "마켓");
         dgvMatch.Columns.Add("Cafe24Order", "Cafe24 주문번호");
         dgvMatch.Columns.Add("OrdPhone", "주문-휴대폰");
         dgvMatch.Columns.Add("OrdName", "주문-수령인");
@@ -642,15 +716,17 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("MStatus", "상태");
 
         dgvMatch.Columns["MrId"]!.Width = 40;
+        dgvMatch.Columns["Cafe24Market"]!.Width = 90;
         dgvMatch.Columns["Confidence"]!.Width = 70;
         dgvMatch.Columns["MStatus"]!.Width = 80;
 
         for (int i = 0; i < _matchResults.Count; i++)
         {
             var mr = _matchResults[i];
+            var marketName = ResolveMarketDisplayName(mr);
             bool auto = mr.MatchStatus == "auto_confirmed";
             var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
-                mr.SourceTracking, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
+                mr.SourceTracking, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
                 mr.OrderProduct, ConfLabel(mr.Confidence), StatLabel(mr.MatchStatus));
 
             dgvMatch.Rows[idx].DefaultCellStyle.BackColor = mr.Confidence switch
@@ -670,7 +746,6 @@ public partial class MainForm : Form
             $"송장없음 {_matchResults.Count(m => m.Confidence == "no_tracking")} | " +
             $"미매칭 {_matchResults.Count(m => m.Confidence == "none")}");
     }
-
     static string ConfLabel(string c) => c switch { "exact" => "✅ 확정", "probable" => "🟡 유력", "candidate" => "🟠 후보", "no_tracking" => "⚠️ 송장없음", _ => "❌ 없음" };
     static string StatLabel(string s) => s switch { "auto_confirmed" => "자동확정", "confirmed" => "수동확정", "pending" => "대기", "pushed" => "반영완료", "push_failed" => "반영실패", "unmatched" => "미매칭", "no_tracking" => "송장미등록", _ => s };
 
@@ -728,7 +803,7 @@ public partial class MainForm : Form
         if (MessageBox.Show($"{confirmed.Count}건을 Cafe24에 반영합니다.\n계속?",
             "반영 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
-        var shipCode = _cafe24Config.DefaultShippingCompanyCode;
+        var shipCode = _primaryCafe24Config.DefaultShippingCompanyCode;
         if (cboShippingCompany.SelectedItem != null)
         {
             var sel = cboShippingCompany.SelectedItem.ToString()!;
@@ -736,69 +811,106 @@ public partial class MainForm : Form
             if (s > 0 && e > s) shipCode = sel[s..e];
         }
 
-        btnPush.Enabled = false; btnPush.Text = "반영 중...";
+        btnPush.Enabled = false;
+        btnPush.Text = "반영 중...";
 
-        dgvResult.Columns.Clear(); dgvResult.Rows.Clear();
+        dgvResult.Columns.Clear();
+        dgvResult.Rows.Clear();
+        dgvResult.Columns.Add("Market", "마켓");
         dgvResult.Columns.Add("OrderId", "주문번호");
         dgvResult.Columns.Add("Tracking", "송장번호");
         dgvResult.Columns.Add("Result", "결과");
         dgvResult.Columns.Add("Detail", "상세");
 
-        int ok = 0, fail = 0;
-        foreach (var mr in confirmed)
-        {
-            var src = FindSourceRowForMatch(mr);
-            var tracking = !string.IsNullOrWhiteSpace(mr.SourceTracking) ? mr.SourceTracking : src?.TrackingNumber ?? "";
-            var code = !string.IsNullOrEmpty(src?.ShippingCompany) ? ResolveShipCode(src.ShippingCompany) : shipCode;
-            var sourceRowId = src?.Id ?? mr.SourceRowId;
+        dgvResult.Columns["Market"]!.Width = 90;
+        dgvResult.Columns["OrderId"]!.Width = 130;
+        dgvResult.Columns["Tracking"]!.Width = 120;
+        dgvResult.Columns["Result"]!.Width = 95;
 
-            if (src != null &&
-                !string.IsNullOrWhiteSpace(mr.SourceTracking) &&
-                !string.Equals(src.TrackingNumber, mr.SourceTracking, StringComparison.OrdinalIgnoreCase))
+        var ok = 0;
+        var fail = 0;
+
+        try
+        {
+            foreach (var mr in confirmed)
             {
-                _log.Warn($"송장 원본 불일치 감지: SourceRowId={mr.SourceRowId}, Match={mr.SourceTracking}, Source={src.TrackingNumber}. 매칭 송장번호를 사용합니다.");
+                var marketName = ResolveMarketDisplayName(mr);
+                var api = FindApiClient(mr.Cafe24MallId);
+                if (api == null)
+                {
+                    var missingIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, "", "❌ 실패", "대상 마켓 API를 찾지 못했습니다.");
+                    dgvResult.Rows[missingIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
+                    _log.Error($"송장 반영 대상 API 없음: {marketName} ({mr.Cafe24MallId}) / 주문 {mr.Cafe24OrderId}");
+                    fail++;
+                    continue;
+                }
+
+                var src = FindSourceRowForMatch(mr);
+                var tracking = !string.IsNullOrWhiteSpace(mr.SourceTracking) ? mr.SourceTracking : src?.TrackingNumber ?? "";
+                var code = !string.IsNullOrEmpty(src?.ShippingCompany) ? ResolveShipCode(src.ShippingCompany) : shipCode;
+                var sourceRowId = src?.Id ?? mr.SourceRowId;
+
+                if (src != null &&
+                    !string.IsNullOrWhiteSpace(mr.SourceTracking) &&
+                    !string.Equals(src.TrackingNumber, mr.SourceTracking, StringComparison.OrdinalIgnoreCase))
+                {
+                    _log.Warn($"송장 원본 불일치 감지: SourceRowId={mr.SourceRowId}, Match={mr.SourceTracking}, Source={src.TrackingNumber}. 매칭 송장번호를 사용합니다.");
+                }
+
+                if (string.IsNullOrEmpty(tracking))
+                {
+                    var skipIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, "", "SKIP", "송장번호 없음");
+                    dgvResult.Rows[skipIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 250, 210);
+                    continue;
+                }
+
+                var (success, resp, status) = await api.PushTrackingNumber(mr.Cafe24OrderId, mr.Cafe24OrderItemCode, tracking, code);
+
+                _db.InsertPushLog(new PushLog
+                {
+                    MatchResultId = mr.Id,
+                    Cafe24MallId = mr.Cafe24MallId,
+                    Cafe24MarketName = marketName,
+                    Cafe24OrderId = mr.Cafe24OrderId,
+                    RequestBody = JsonConvert.SerializeObject(new { tracking, code }),
+                    ResponseBody = resp,
+                    HttpStatusCode = status,
+                    Result = success ? "success" : "fail",
+                    ErrorMessage = success ? "" : resp,
+                    PushedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                });
+
+                var nextStatus = success ? "pushed" : "push_failed";
+                _db.UpdateMatchStatus(mr.Id, nextStatus, true);
+                if (sourceRowId > 0)
+                    _db.UpdateSourceRowStatus(sourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
+
+                var idx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, tracking,
+                    success ? "✅ 성공" : $"❌ 실패 ({status})", resp.Length > 200 ? resp[..200] : resp);
+                dgvResult.Rows[idx].DefaultCellStyle.BackColor = success ? Color.FromArgb(220, 255, 220) : Color.FromArgb(255, 220, 220);
+                if (success) ok++; else fail++;
             }
 
-            if (string.IsNullOrEmpty(tracking)) { dgvResult.Rows.Add(mr.Cafe24OrderId, "", "SKIP", "송장번호 없음"); continue; }
-
-            var (success, resp, status) = await _api.PushTrackingNumber(mr.Cafe24OrderId, mr.Cafe24OrderItemCode, tracking, code);
-
-            _db.InsertPushLog(new PushLog
-            {
-                MatchResultId = mr.Id, Cafe24OrderId = mr.Cafe24OrderId,
-                RequestBody = JsonConvert.SerializeObject(new { tracking, code }),
-                ResponseBody = resp, HttpStatusCode = status,
-                Result = success ? "success" : "fail",
-                ErrorMessage = success ? "" : resp,
-                PushedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
-            });
-
-            var ns = success ? "pushed" : "push_failed";
-            _db.UpdateMatchStatus(mr.Id, ns, true);
-            if (sourceRowId > 0)
-                _db.UpdateSourceRowStatus(sourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
-
-            var idx = dgvResult.Rows.Add(mr.Cafe24OrderId, tracking,
-                success ? "✅ 성공" : $"❌ 실패 ({status})", resp.Length > 200 ? resp[..200] : resp);
-            dgvResult.Rows[idx].DefaultCellStyle.BackColor = success ? Color.FromArgb(220, 255, 220) : Color.FromArgb(255, 220, 220);
-            if (success) ok++; else fail++;
+            _log.Info($"반영 완료: 성공 {ok}, 실패 {fail}");
+            tabShipSub.SelectedIndex = 2;
         }
-
-        _log.Info($"반영 완료: 성공 {ok}, 실패 {fail}");
-        tabShipSub.SelectedIndex = 2;
-        btnPush.Enabled = true; btnPush.Text = "✅ 확정 항목 반영";
+        catch (Exception ex)
+        {
+            _log.Error("송장 반영 오류", ex);
+            MessageBox.Show($"송장 반영 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            btnPush.Enabled = true;
+            btnPush.Text = "✅ 확정 항목 반영";
+        }
     }
-
     private string ResolveShipCode(string name)
     {
         foreach (var kv in Cafe24ApiClient.ShippingCompanyCodes)
             if (name.Contains(kv.Key, StringComparison.OrdinalIgnoreCase)) return kv.Value;
-        return _cafe24Config.DefaultShippingCompanyCode;
+        return _primaryCafe24Config.DefaultShippingCompanyCode;
     }
-
-    // ═══════════════════════════════════════
-    // Export
-    // ═══════════════════════════════════════
     private void ExportFailed()
     {
         var failed = _matchResults.Where(m => m.MatchStatus is "unmatched" or "push_failed" or "pending").ToList();
@@ -808,9 +920,9 @@ public partial class MainForm : Form
         if (sfd.ShowDialog() != DialogResult.OK) return;
 
         var sb = new StringBuilder();
-        sb.AppendLine("SourceRowId,출고-휴대폰,출고-수령인,송장번호,Cafe24주문번호,주문-수령인,확신도,상태");
+        sb.AppendLine("SourceRowId,마켓,출고-휴대폰,출고-수령인,송장번호,Cafe24주문번호,주문-수령인,확신도,상태");
         foreach (var m in failed)
-            sb.AppendLine($"{m.SourceRowId},{m.SourcePhone},{m.SourceName},{m.SourceTracking},{m.Cafe24OrderId},{m.OrderName},{m.Confidence},{m.MatchStatus}");
+            sb.AppendLine($"{m.SourceRowId},{ResolveMarketDisplayName(m)},{m.SourcePhone},{m.SourceName},{m.SourceTracking},{m.Cafe24OrderId},{m.OrderName},{m.Confidence},{m.MatchStatus}");
 
         File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
         _log.Info($"Export: {sfd.FileName} ({failed.Count}건)");

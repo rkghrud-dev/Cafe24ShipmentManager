@@ -5,6 +5,8 @@ public class MatchResult
     public long Id { get; set; }
     public long SourceRowId { get; set; }
     public long Cafe24OrderCacheId { get; set; }
+    public string Cafe24MallId { get; set; } = "";
+    public string Cafe24MarketName { get; set; } = "";
     public string Cafe24OrderId { get; set; } = "";
     public string Cafe24OrderItemCode { get; set; } = "";
     public string Confidence { get; set; } = "none"; // exact / probable / candidate / none

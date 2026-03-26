@@ -43,6 +43,8 @@ public class DatabaseManager
 
             CREATE TABLE IF NOT EXISTS cafe24_orders_cache (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                MallId TEXT DEFAULT '',
+                MarketName TEXT DEFAULT '',
                 OrderId TEXT NOT NULL,
                 OrderItemCode TEXT DEFAULT '',
                 RecipientPhone TEXT DEFAULT '',
@@ -62,6 +64,8 @@ public class DatabaseManager
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 SourceRowId INTEGER NOT NULL,
                 Cafe24OrderCacheId INTEGER DEFAULT 0,
+                Cafe24MallId TEXT DEFAULT '',
+                Cafe24MarketName TEXT DEFAULT '',
                 Cafe24OrderId TEXT DEFAULT '',
                 Cafe24OrderItemCode TEXT DEFAULT '',
                 Confidence TEXT DEFAULT 'none',
@@ -73,6 +77,8 @@ public class DatabaseManager
             CREATE TABLE IF NOT EXISTS push_log (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 MatchResultId INTEGER NOT NULL DEFAULT 0,
+                Cafe24MallId TEXT DEFAULT '',
+                Cafe24MarketName TEXT DEFAULT '',
                 Cafe24OrderId TEXT DEFAULT '',
                 RequestBody TEXT DEFAULT '',
                 ResponseBody TEXT DEFAULT '',
@@ -140,6 +146,32 @@ public class DatabaseManager
                 MarkedAt TEXT NOT NULL
             );
         ");
+
+        EnsureSchemaUpgrades(conn);
+    }
+
+    private void EnsureSchemaUpgrades(SqliteConnection conn)
+    {
+        EnsureColumnExists(conn, "cafe24_orders_cache", "MallId", "TEXT DEFAULT ''");
+        EnsureColumnExists(conn, "cafe24_orders_cache", "MarketName", "TEXT DEFAULT ''");
+        EnsureColumnExists(conn, "match_results", "Cafe24MallId", "TEXT DEFAULT ''");
+        EnsureColumnExists(conn, "match_results", "Cafe24MarketName", "TEXT DEFAULT ''");
+        EnsureColumnExists(conn, "push_log", "Cafe24MallId", "TEXT DEFAULT ''");
+        EnsureColumnExists(conn, "push_log", "Cafe24MarketName", "TEXT DEFAULT ''");
+    }
+
+    private static void EnsureColumnExists(SqliteConnection conn, string tableName, string columnName, string definition)
+    {
+        var hasColumn = conn.Query<SqliteTableInfo>($"PRAGMA table_info({tableName})")
+            .Any(column => string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase));
+
+        if (!hasColumn)
+            conn.Execute($"ALTER TABLE {tableName} ADD COLUMN {columnName} {definition}");
+    }
+
+    private sealed class SqliteTableInfo
+    {
+        public string Name { get; set; } = "";
     }
 
     // ── ShipmentSourceRow ──
@@ -218,9 +250,9 @@ public class DatabaseManager
         using var conn = GetConnection();
         conn.Execute(@"
             INSERT INTO cafe24_orders_cache
-                (OrderId, OrderItemCode, RecipientPhone, RecipientName, RecipientCellPhone, OrderStatus, ProductName, OrderAmount, Quantity, OrderDate, ShippingCode, RawJson, CachedAt)
+                (MallId, MarketName, OrderId, OrderItemCode, RecipientPhone, RecipientName, RecipientCellPhone, OrderStatus, ProductName, OrderAmount, Quantity, OrderDate, ShippingCode, RawJson, CachedAt)
             VALUES
-                (@OrderId, @OrderItemCode, @RecipientPhone, @RecipientName, @RecipientCellPhone, @OrderStatus, @ProductName, @OrderAmount, @Quantity, @OrderDate, @ShippingCode, @RawJson, @CachedAt)", order);
+                (@MallId, @MarketName, @OrderId, @OrderItemCode, @RecipientPhone, @RecipientName, @RecipientCellPhone, @OrderStatus, @ProductName, @OrderAmount, @Quantity, @OrderDate, @ShippingCode, @RawJson, @CachedAt)", order);
     }
 
     public List<Cafe24Order> GetCachedOrdersByPhone(string phone)
@@ -243,9 +275,9 @@ public class DatabaseManager
         using var conn = GetConnection();
         return conn.ExecuteScalar<long>(@"
             INSERT INTO match_results
-                (SourceRowId, Cafe24OrderCacheId, Cafe24OrderId, Cafe24OrderItemCode, Confidence, MatchStatus, ChosenByUser, CreatedAt)
+                (SourceRowId, Cafe24OrderCacheId, Cafe24MallId, Cafe24MarketName, Cafe24OrderId, Cafe24OrderItemCode, Confidence, MatchStatus, ChosenByUser, CreatedAt)
             VALUES
-                (@SourceRowId, @Cafe24OrderCacheId, @Cafe24OrderId, @Cafe24OrderItemCode, @Confidence, @MatchStatus, @ChosenByUser, @CreatedAt);
+                (@SourceRowId, @Cafe24OrderCacheId, @Cafe24MallId, @Cafe24MarketName, @Cafe24OrderId, @Cafe24OrderItemCode, @Confidence, @MatchStatus, @ChosenByUser, @CreatedAt);
             SELECT last_insert_rowid();", mr);
     }
 
@@ -295,15 +327,16 @@ public class DatabaseManager
 
         tx.Commit();
     }
+
     // ── Push Log ──
     public void InsertPushLog(PushLog log)
     {
         using var conn = GetConnection();
         conn.Execute(@"
             INSERT INTO push_log
-                (MatchResultId, Cafe24OrderId, RequestBody, ResponseBody, HttpStatusCode, Result, ErrorMessage, PushedAt)
+                (MatchResultId, Cafe24MallId, Cafe24MarketName, Cafe24OrderId, RequestBody, ResponseBody, HttpStatusCode, Result, ErrorMessage, PushedAt)
             VALUES
-                (@MatchResultId, @Cafe24OrderId, @RequestBody, @ResponseBody, @HttpStatusCode, @Result, @ErrorMessage, @PushedAt)", log);
+                (@MatchResultId, @Cafe24MallId, @Cafe24MarketName, @Cafe24OrderId, @RequestBody, @ResponseBody, @HttpStatusCode, @Result, @ErrorMessage, @PushedAt)", log);
     }
 
     public List<PushLog> GetPushLogs(int limit = 500)
@@ -481,4 +514,3 @@ public class DatabaseManager
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 }
-

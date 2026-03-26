@@ -4,6 +4,8 @@ public class PushLog
 {
     public long Id { get; set; }
     public long MatchResultId { get; set; }
+    public string Cafe24MallId { get; set; } = "";
+    public string Cafe24MarketName { get; set; } = "";
     public string Cafe24OrderId { get; set; } = "";
     public string RequestBody { get; set; } = "";
     public string ResponseBody { get; set; } = "";

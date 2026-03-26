@@ -3,6 +3,8 @@ namespace Cafe24ShipmentManager.Models;
 public class Cafe24Order
 {
     public long Id { get; set; }
+    public string MallId { get; set; } = "";
+    public string MarketName { get; set; } = "";
     public string OrderId { get; set; } = "";
     public string OrderItemCode { get; set; } = "";
     public string RecipientPhone { get; set; } = "";
