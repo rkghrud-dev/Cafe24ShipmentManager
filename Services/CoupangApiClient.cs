@@ -148,7 +148,11 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
                     return acknowledge;
             }
 
-            return await UploadInvoiceAsync(orderId, shipmentBoxId, vendorItemId, trackingNumber, shippingCompanyCode);
+            var normalizedTrackingNumber = NormalizeInvoiceNumber(trackingNumber);
+            if (!string.Equals(normalizedTrackingNumber, trackingNumber, StringComparison.Ordinal))
+                _log.Info($"[{DisplayName}] 쿠팡 송장번호 정규화: {trackingNumber} → {normalizedTrackingNumber}");
+
+            return await UploadInvoiceAsync(orderId, shipmentBoxId, vendorItemId, normalizedTrackingNumber, shippingCompanyCode);
         }
         catch (Exception ex)
         {
@@ -169,6 +173,14 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
         }
 
         return DefaultShippingCompanyCode;
+    }
+
+    private static string NormalizeInvoiceNumber(string trackingNumber)
+    {
+        if (string.IsNullOrWhiteSpace(trackingNumber))
+            return string.Empty;
+
+        return new string(trackingNumber.Where(char.IsLetterOrDigit).ToArray());
     }
 
     private async Task<(bool success, string responseBody, int statusCode)> AcknowledgeAsync(long shipmentBoxId)
@@ -272,7 +284,7 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
                 MarketName = DisplayName,
                 OrderId = orderId,
                 OrderItemCode = item["vendorItemId"]?.ToString() ?? string.Empty,
-                ShippingCode = item["shipmentBoxId"]?.ToString() ?? string.Empty,
+                ShippingCode = item["shipmentBoxId"]?.ToString() ?? orderSheet["shipmentBoxId"]?.ToString() ?? string.Empty,
                 RecipientName = recipientName,
                 RecipientCellPhone = PhoneNormalizer.Normalize(safeNumber),
                 RecipientPhone = PhoneNormalizer.Normalize(receiverNumber),
@@ -356,6 +368,8 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
         return 0;
     }
 }
+
+
 
 
 
