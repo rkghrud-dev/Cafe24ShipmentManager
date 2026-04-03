@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using ClosedXML.Excel;
 using Cafe24ShipmentManager.Models;
+using Cafe24ShipmentManager.Services;
 using Newtonsoft.Json.Linq;
 
 namespace Cafe24ShipmentManager;
@@ -476,6 +477,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private static ShipmentRequestOrderRowEx BuildRow(Cafe24Order order, string marketName, string orderDateText)
     {
+        if (MarketplaceSourceKey.IsCoupang(order.MallId))
+            return BuildCoupangRow(order, marketName, orderDateText);
+
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = SelectReceiver(orderJson, order);
         var item = SelectItem(orderJson, order);
@@ -503,6 +507,86 @@ internal static class ShipmentRequestOrderExportFormatterEx
             ShippingMessage = receiver?["shipping_message"]?.ToString() ?? string.Empty,
             DetailAddress = detailAddress
         };
+    }
+
+    private static ShipmentRequestOrderRowEx BuildCoupangRow(Cafe24Order order, string marketName, string orderDateText)
+    {
+        var orderJson = ParseOrderJson(order.RawJson);
+        var receiver = orderJson?["receiver"] as JObject;
+        var item = SelectCoupangItem(orderJson, order);
+
+        var optionText = item?["sellerProductItemName"]?.ToString()
+                         ?? item?["vendorItemName"]?.ToString()
+                         ?? string.Empty;
+        var baseProductCode = ResolveCoupangProductCode(item, order);
+        var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+
+        var detailAddress = receiver?["addr2"]?.ToString() ?? string.Empty;
+        var fullAddress = CombineAddress(
+            receiver?["addr1"]?.ToString() ?? string.Empty,
+            detailAddress,
+            string.Join(" ", new[]
+            {
+                receiver?["addr1"]?.ToString() ?? string.Empty,
+                receiver?["addr2"]?.ToString() ?? string.Empty
+            }.Where(value => !string.IsNullOrWhiteSpace(value))));
+
+        return new ShipmentRequestOrderRowEx
+        {
+            ProductCode = finalProductCode,
+            MarketName = marketName,
+            ExportDate = orderDateText,
+            Quantity = order.Quantity,
+            RecipientName = receiver?["name"]?.ToString() ?? order.RecipientName,
+            RecipientPhone = ResolveCoupangRecipientPhone(receiver, order),
+            PostalCode = receiver?["postCode"]?.ToString() ?? string.Empty,
+            FullAddress = fullAddress,
+            ShippingMessage = orderJson?["parcelPrintMessage"]?.ToString()
+                              ?? orderJson?["deliveryInstruction"]?.ToString()
+                              ?? string.Empty,
+            DetailAddress = detailAddress
+        };
+    }
+
+    private static JObject? SelectCoupangItem(JObject? orderJson, Cafe24Order order)
+    {
+        var items = orderJson?["orderItems"] as JArray;
+        if (items == null || items.Count == 0) return null;
+
+        return items
+            .OfType<JObject>()
+            .FirstOrDefault(item =>
+                string.Equals(item["vendorItemId"]?.ToString(), order.OrderItemCode, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(item["shipmentBoxId"]?.ToString(), order.ShippingCode, StringComparison.OrdinalIgnoreCase))
+            ?? items.OfType<JObject>().FirstOrDefault();
+    }
+
+    private static string ResolveCoupangProductCode(JObject? item, Cafe24Order order)
+    {
+        foreach (var candidate in new[]
+        {
+            item?["externalVendorSkuCode"]?.ToString(),
+            item?["sellerProductItemName"]?.ToString(),
+            item?["sellerProductName"]?.ToString(),
+            item?["vendorItemName"]?.ToString(),
+            order.ProductName
+        })
+        {
+            var extracted = ExtractProductCode(candidate);
+            if (!string.IsNullOrWhiteSpace(extracted))
+                return extracted;
+        }
+
+        return string.Empty;
+    }
+
+    private static string ResolveCoupangRecipientPhone(JObject? receiver, Cafe24Order order)
+    {
+        return receiver?["safeNumber"]?.ToString()
+               ?? receiver?["receiverNumber"]?.ToString()
+               ?? order.RecipientCellPhone
+               ?? order.RecipientPhone
+               ?? string.Empty;
     }
 
     private static JObject? ParseOrderJson(string rawJson)
@@ -683,6 +767,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
             .Trim();
     }
 }
+
+
 
 
 

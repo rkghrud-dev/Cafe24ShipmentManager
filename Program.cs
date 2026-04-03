@@ -1,4 +1,3 @@
-using Cafe24ShipmentManager;
 using Cafe24ShipmentManager.Data;
 using Cafe24ShipmentManager.Services;
 using Microsoft.Data.Sqlite;
@@ -42,34 +41,51 @@ static class Program
         var spreadsheetId = gsSection?["SpreadsheetId"]?.ToString() ?? "";
         var defaultSheetName = gsSection?["DefaultSheetName"]?.ToString() ?? "";
 
-        var cafe24Section = config["Cafe24"] as JObject;
-        var cafe24Configs = BuildCafe24Configs(cafe24Section, configPath);
-
         var dbConnStrRaw = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
         var dbConnStr = NormalizeSqliteConnectionString(dbConnStrRaw);
         var logDir = ResolvePath(config["Logging"]?["LogDirectory"]?.ToString() ?? "logs");
-
         var logger = new AppLogger(logDir);
-        foreach (var cafe24Config in cafe24Configs)
-            Cafe24SharedTokenStore.LoadInto(cafe24Config, logger);
 
-        cafe24Configs = cafe24Configs
-            .Where(c => !string.IsNullOrWhiteSpace(c.MallId))
-            .GroupBy(c => c.MallId, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.First())
-            .ToList();
-
-        if (cafe24Configs.Count == 0)
+        var marketClients = BuildMarketplaceClients(configPath, config, logger);
+        if (marketClients.Count == 0)
         {
-            MessageBox.Show("Cafe24 설정을 찾지 못했습니다. 토큰 파일 경로를 확인하세요.",
-                "Cafe24 설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("활성화된 마켓 API 설정을 찾지 못했습니다. appsettings.json을 확인하세요.",
+                "마켓 설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        logger.Info($"Cafe24 연동 몰: {string.Join(", ", cafe24Configs.Select(c => $"{ResolveDisplayName(c)}({c.MallId})"))}");
+        logger.Info($"연동 마켓: {string.Join(", ", marketClients.Select(client => $"{client.DisplayName}({client.SourceKey})"))}");
 
         var db = new DatabaseManager(dbConnStr);
-        Application.Run(new MainForm(db, logger, cafe24Configs, credentialPath, spreadsheetId, defaultSheetName));
+        Application.Run(new MainForm(db, logger, marketClients, credentialPath, spreadsheetId, defaultSheetName));
+    }
+
+    private static List<IMarketplaceApiClient> BuildMarketplaceClients(string configPath, JObject config, AppLogger logger)
+    {
+        var clients = new List<IMarketplaceApiClient>();
+
+        var cafe24Section = config["Cafe24"] as JObject;
+        var cafe24Configs = BuildCafe24Configs(cafe24Section, configPath)
+            .Where(c => c.Enabled)
+            .ToList();
+
+        foreach (var cafe24Config in cafe24Configs)
+            Cafe24SharedTokenStore.LoadInto(cafe24Config, logger);
+
+        clients.AddRange(cafe24Configs
+            .Where(c => !string.IsNullOrWhiteSpace(c.MallId))
+            .GroupBy(c => c.MallId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new Cafe24ApiClient(group.First(), logger)));
+
+        var coupangSection = config["Coupang"] as JObject;
+        clients.AddRange(BuildCoupangConfigs(coupangSection)
+            .Where(c => c.Enabled)
+            .Where(c => !string.IsNullOrWhiteSpace(c.VendorId))
+            .Where(c => !string.IsNullOrWhiteSpace(c.AccessKey))
+            .Where(c => !string.IsNullOrWhiteSpace(c.SecretKey))
+            .Select(c => new CoupangApiClient(c, logger)));
+
+        return clients;
     }
 
     private static List<Cafe24Config> BuildCafe24Configs(JObject? cafe24Section, string configPath)
@@ -83,10 +99,9 @@ static class Program
                 .ToList();
         }
 
-        return new List<Cafe24Config>
-        {
-            CreateCafe24Config(cafe24Section, null, configPath)
-        };
+        return cafe24Section == null
+            ? new List<Cafe24Config>()
+            : new List<Cafe24Config> { CreateCafe24Config(cafe24Section, null, configPath) };
     }
 
     private static Cafe24Config CreateCafe24Config(JObject? cafe24Section, JObject? marketSection, string configPath)
@@ -96,6 +111,7 @@ static class Program
 
         return new Cafe24Config
         {
+            Enabled = ReadBool(marketSection, "Enabled", ReadBool(cafe24Section, "Enabled", true)),
             DisplayName = ReadString(marketSection, "DisplayName", ReadString(cafe24Section, "DisplayName", "")),
             MallId = ReadString(marketSection, "MallId", ReadString(cafe24Section, "MallId", "")),
             AccessToken = ReadString(marketSection, "AccessToken", ReadString(cafe24Section, "AccessToken", "")),
@@ -113,10 +129,42 @@ static class Program
         };
     }
 
+    private static List<CoupangConfig> BuildCoupangConfigs(JObject? coupangSection)
+    {
+        var markets = coupangSection?["Markets"] as JArray;
+        if (markets != null && markets.Count > 0)
+        {
+            return markets
+                .OfType<JObject>()
+                .Select(marketSection => CreateCoupangConfig(coupangSection, marketSection))
+                .ToList();
+        }
+
+        return coupangSection == null
+            ? new List<CoupangConfig>()
+            : new List<CoupangConfig> { CreateCoupangConfig(coupangSection, null) };
+    }
+
+    private static CoupangConfig CreateCoupangConfig(JObject? coupangSection, JObject? marketSection)
+    {
+        return new CoupangConfig
+        {
+            Enabled = ReadBool(marketSection, "Enabled", ReadBool(coupangSection, "Enabled", true)),
+            DisplayName = ReadString(marketSection, "DisplayName", ReadString(coupangSection, "DisplayName", "홈런마켓")),
+            VendorId = ReadString(marketSection, "VendorId", ReadString(coupangSection, "VendorId", "")),
+            AccessKey = ReadString(marketSection, "AccessKey", ReadString(coupangSection, "AccessKey", "")),
+            SecretKey = ReadString(marketSection, "SecretKey", ReadString(coupangSection, "SecretKey", "")),
+            ApiBaseUrl = ReadString(marketSection, "ApiBaseUrl", ReadString(coupangSection, "ApiBaseUrl", "https://api-gateway.coupang.com")),
+            DefaultShippingCompanyCode = ReadString(marketSection, "DefaultShippingCompanyCode", ReadString(coupangSection, "DefaultShippingCompanyCode", "CJGLS")),
+            OrderFetchDays = ReadInt(marketSection, "OrderFetchDays", ReadInt(coupangSection, "OrderFetchDays", 14)),
+            FetchStatuses = ReadStringList(marketSection, "FetchStatuses", ReadStringList(coupangSection, "FetchStatuses", new List<string> { "ACCEPT", "INSTRUCT" }))
+        };
+    }
+
     private static string ReadString(JObject? section, string propertyName, string fallback)
     {
         var value = section?[propertyName]?.ToString();
-        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+        return string.IsNullOrWhiteSpace(value) ? fallback : Environment.ExpandEnvironmentVariables(value);
     }
 
     private static int ReadInt(JObject? section, string propertyName, int fallback)
@@ -124,9 +172,17 @@ static class Program
         return section?[propertyName]?.Value<int?>() ?? fallback;
     }
 
-    private static string ResolveDisplayName(Cafe24Config config)
+    private static bool ReadBool(JObject? section, string propertyName, bool fallback)
     {
-        return string.IsNullOrWhiteSpace(config.DisplayName) ? config.MallId : config.DisplayName;
+        return section?[propertyName]?.Value<bool?>() ?? fallback;
+    }
+
+    private static List<string> ReadStringList(JObject? section, string propertyName, List<string> fallback)
+    {
+        var array = section?[propertyName] as JArray;
+        return array == null
+            ? fallback
+            : array.Values<string?>().Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToList();
     }
 
     private static string ResolvePath(string path)
@@ -147,3 +203,4 @@ static class Program
         return builder.ToString();
     }
 }
+

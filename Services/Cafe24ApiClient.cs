@@ -9,6 +9,7 @@ namespace Cafe24ShipmentManager.Services;
 
 public class Cafe24Config
 {
+    public bool Enabled { get; set; } = true;
     public string DisplayName { get; set; } = "";
     public string MallId { get; set; } = "";
     public string AccessToken { get; set; } = "";
@@ -25,7 +26,7 @@ public class Cafe24Config
     public string TokenFilePath { get; set; } = "";
 }
 
-public class Cafe24ApiClient
+public class Cafe24ApiClient : IMarketplaceApiClient
 {
     private readonly HttpClient _http;
     private readonly Cafe24Config _config;
@@ -47,6 +48,8 @@ public class Cafe24ApiClient
         { "자체배송", "0001" },
     };
 
+    
+
     public Cafe24ApiClient(Cafe24Config config, AppLogger logger)
     {
         _config = config;
@@ -60,6 +63,10 @@ public class Cafe24ApiClient
         _http.DefaultRequestHeaders.Add("X-Cafe24-Api-Version", config.ApiVersion);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
+    public string SourceKey => _config.MallId;
+    public string DisplayName => ResolveMarketDisplayName();
+    public string DefaultShippingCompanyCode => _config.DefaultShippingCompanyCode;
+    public int DefaultOrderFetchDays => _config.OrderFetchDays;
 
     /// <summary>
     /// 날짜 범위로 주문 목록 조회 (페이징 처리)
@@ -176,6 +183,24 @@ public class Cafe24ApiClient
     /// <summary>
     /// 주문에 송장번호 입력 + 배송중 처리
     /// </summary>
+    public Task<(bool success, string responseBody, int statusCode)> PushTrackingNumber(Cafe24Order order, string trackingNumber, string shippingCompanyCode)
+    {
+        return PushTrackingNumber(order.OrderId, order.OrderItemCode, trackingNumber, shippingCompanyCode);
+    }
+
+    public string ResolveShippingCompanyCode(string? shippingCompanyName)
+    {
+        if (string.IsNullOrWhiteSpace(shippingCompanyName))
+            return _config.DefaultShippingCompanyCode;
+
+        foreach (var kv in ShippingCompanyCodes)
+        {
+            if (shippingCompanyName.Contains(kv.Key, StringComparison.OrdinalIgnoreCase)) return kv.Value;
+        }
+
+        return _config.DefaultShippingCompanyCode;
+    }
+
     public async Task<(bool success, string responseBody, int statusCode)> PushTrackingNumber(
         string orderId, string orderItemCode, string trackingNumber, string shippingCompanyCode)
     {
@@ -579,3 +604,5 @@ public class Cafe24ApiClient
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
     }
 }
+
+
