@@ -885,6 +885,30 @@ public partial class MainForm : Form
 
         try
         {
+            var duplicateTargetTrackings = confirmed
+                .Select(mr =>
+                {
+                    var api = FindApiClient(mr.Cafe24MallId);
+                    var order = api == null ? null : FindOrderForMatch(mr);
+                    var src = order == null ? null : FindSourceRowForMatch(mr);
+                    var tracking = !string.IsNullOrWhiteSpace(mr.SourceTracking) ? mr.SourceTracking : src?.TrackingNumber ?? "";
+                    var targetKey = api == null || order == null ? "" : BuildPushTargetKey(api, order);
+                    return new
+                    {
+                        TargetKey = targetKey,
+                        Tracking = NormalizeTrackingForPush(tracking)
+                    };
+                })
+                .Where(x => !string.IsNullOrWhiteSpace(x.TargetKey) && !string.IsNullOrWhiteSpace(x.Tracking))
+                .GroupBy(x => x.TargetKey, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Select(x => x.Tracking).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any())
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(x => x.Tracking).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            var attemptedTargets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var mr in confirmed)
             {
                 var marketName = ResolveMarketDisplayName(mr);
@@ -929,7 +953,36 @@ public partial class MainForm : Form
                     continue;
                 }
 
+                var targetKey = BuildPushTargetKey(api, order);
+                var normalizedTracking = NormalizeTrackingForPush(tracking);
+
+                if (!string.IsNullOrWhiteSpace(targetKey) &&
+                    duplicateTargetTrackings.TryGetValue(targetKey, out var conflictingTrackings))
+                {
+                    var detail = $"동일 출고 대상에 서로 다른 송장번호가 매칭되어 반영을 중단했습니다: {string.Join(", ", conflictingTrackings)}";
+                    var conflictIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, tracking, "❌ 실패", detail);
+                    dgvResult.Rows[conflictIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
+                    _log.Error($"중복 출고 대상 충돌: {marketName} / 주문 {mr.Cafe24OrderId} / 대상 {targetKey} / {detail}");
+                    fail++;
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(targetKey) &&
+                    attemptedTargets.TryGetValue(targetKey, out var attemptedTracking))
+                {
+                    var detail = string.Equals(attemptedTracking, normalizedTracking, StringComparison.OrdinalIgnoreCase)
+                        ? "동일 출고 대상/송장번호 중복으로 추가 반영을 생략했습니다."
+                        : "동일 출고 대상은 이번 실행에서 1회만 처리합니다.";
+                    var duplicateIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, tracking, "SKIP", detail);
+                    dgvResult.Rows[duplicateIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 250, 210);
+                    _log.Warn($"중복 출고 대상 생략: {marketName} / 주문 {mr.Cafe24OrderId} / 대상 {targetKey} / 송장 {tracking}");
+                    continue;
+                }
+
                 var (success, resp, status) = await api.PushTrackingNumber(order, tracking, code);
+
+                if (!string.IsNullOrWhiteSpace(targetKey))
+                    attemptedTargets[targetKey] = normalizedTracking;
 
                 _db.InsertPushLog(new PushLog
                 {
@@ -990,6 +1043,25 @@ public partial class MainForm : Form
     {
         return client.ResolveShippingCompanyCode(name);
     }
+
+    private static string BuildPushTargetKey(IMarketplaceApiClient client, Cafe24Order order)
+    {
+        if (MarketplaceSourceKey.IsCoupang(order.MallId) && !string.IsNullOrWhiteSpace(order.ShippingCode))
+            return $"{client.SourceKey}|shipment:{order.ShippingCode}";
+
+        if (!string.IsNullOrWhiteSpace(order.OrderItemCode))
+            return $"{client.SourceKey}|item:{order.OrderId}|{order.OrderItemCode}";
+
+        return $"{client.SourceKey}|order:{order.OrderId}";
+    }
+
+    private static string NormalizeTrackingForPush(string tracking)
+    {
+        return string.IsNullOrWhiteSpace(tracking)
+            ? string.Empty
+            : new string(tracking.Where(char.IsLetterOrDigit).ToArray());
+    }
+
     private void ExportFailed()
     {
         var failed = _matchResults.Where(m => m.MatchStatus is "unmatched" or "push_failed" or "pending").ToList();

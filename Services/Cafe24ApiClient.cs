@@ -32,6 +32,10 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     private readonly Cafe24Config _config;
     private readonly AppLogger _log;
     private const int MaxRetries = 3;
+    // ngrok 불필요 — 프로그램 내장 로컬 콜백 서버 사용
+    // Cafe24 개발자 앱 설정에서 리디렉션 URI를 아래 값으로 1회 등록 필요
+    private const string LocalCallbackPrefix = "http://localhost:19521/oauth/callback/";
+    private const string LocalCallbackUri    = "http://localhost:19521/oauth/callback";
     private const string SharedOAuthScope =
         "mall.read_order,mall.write_order,mall.read_shipping,mall.write_shipping,mall.read_product,mall.write_product";
 
@@ -117,12 +121,23 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                 var items = o["items"] as JArray;
                 if (items != null)
                 {
+                    var matchedItemCount = 0;
                     foreach (var item in items)
                     {
+                        var itemStatus = item["order_status"]?.ToString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(orderStatus) &&
+                            !string.Equals(itemStatus, orderStatus, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
                         orders.Add(ParseOrder(o, item, orderId));
+                        matchedItemCount++;
                     }
+
+                    if (matchedItemCount == 0 && string.IsNullOrWhiteSpace(orderStatus))
+                        orders.Add(ParseOrder(o, null, orderId));
                 }
-                else
+                else if (string.IsNullOrWhiteSpace(orderStatus) ||
+                         string.Equals(o["order_status"]?.ToString(), orderStatus, StringComparison.OrdinalIgnoreCase))
                 {
                     orders.Add(ParseOrder(o, null, orderId));
                 }
@@ -402,34 +417,138 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         }
     }
     /// <summary>
-    /// Refresh Token 만료 시 브라우저 OAuth 재인증으로 새 토큰 발급
+    /// Refresh Token 만료 시 브라우저 OAuth 재인증으로 새 토큰 발급.
+    /// 1순위: localhost:19521 내장 서버로 자동 수신 (ngrok 불필요)
+    /// 2순위: 사용자가 브라우저 주소창 URL을 수동으로 붙여넣기
     /// </summary>
     public async Task<bool> ReauthorizeViaOAuthAsync()
     {
-        if (string.IsNullOrEmpty(_config.ClientId) || string.IsNullOrEmpty(_config.RedirectUri))
+        if (string.IsNullOrEmpty(_config.ClientId))
         {
-            _log.Error($"OAuth 재인증 불가: ClientId='{_config.ClientId}', RedirectUri='{_config.RedirectUri}'");
+            _log.Error("OAuth 재인증 불가: ClientId가 비어있음");
             return false;
         }
 
         var state = Guid.NewGuid().ToString("N")[..8];
         var authUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/authorize" +
             $"?response_type=code&client_id={_config.ClientId}" +
-            $"&redirect_uri={Uri.EscapeDataString(_config.RedirectUri)}" +
+            $"&redirect_uri={Uri.EscapeDataString(LocalCallbackUri)}" +
             $"&scope={SharedOAuthScope}&state={state}";
 
-        // 브라우저 열기
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
+        // 1순위: localhost 내장 서버로 자동 수신
+        string? code = null;
+        bool browserOpened = false;
+        try
+        {
+            (code, browserOpened) = await TryCaptureOAuthCodeViaLocalhost(authUrl, state);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"localhost 콜백 자동수신 실패: {ex.Message}");
+        }
 
-        // 사용자에게 URL 붙여넣기 요청
-        var code = PromptForAuthorizationCode();
+        // 2순위: 수동 붙여넣기 fallback
+        if (string.IsNullOrEmpty(code))
+        {
+            if (!browserOpened)
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
+            code = PromptForAuthorizationCode();
+        }
+
         if (string.IsNullOrEmpty(code))
         {
             _log.Warn("OAuth 재인증 취소됨");
             return false;
         }
 
-        // 인증 코드로 토큰 교환
+        return await ExchangeCodeForTokenAsync(code);
+    }
+
+    /// <summary>
+    /// localhost:19521에 임시 HTTP 서버를 열어 OAuth 콜백 코드를 자동 수신
+    /// </summary>
+    private async Task<(string? code, bool browserOpened)> TryCaptureOAuthCodeViaLocalhost(string authUrl, string expectedState)
+    {
+        var listener = new HttpListener();
+        try
+        {
+            listener.Prefixes.Add(LocalCallbackPrefix);
+            listener.Start();
+        }
+        catch (HttpListenerException ex)
+        {
+            _log.Warn($"localhost:19521 포트 사용 불가 ({ex.ErrorCode}), 수동 입력으로 전환");
+            return (null, false);
+        }
+
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
+        _log.Info("브라우저에서 Cafe24 로그인 완료 시 자동으로 인증 코드가 수신됩니다 (최대 3분 대기)...");
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            HttpListenerContext ctx;
+            try
+            {
+                var ctxTask = listener.GetContextAsync();
+                await Task.WhenAny(ctxTask, Task.Delay(Timeout.Infinite, cts.Token));
+                if (!ctxTask.IsCompleted)
+                {
+                    _log.Warn("OAuth 콜백 대기 시간 초과 (3분), 수동 입력으로 전환");
+                    return (null, true);
+                }
+                ctx = await ctxTask;
+            }
+            catch (OperationCanceledException)
+            {
+                _log.Warn("OAuth 콜백 대기 시간 초과 (3분), 수동 입력으로 전환");
+                return (null, true);
+            }
+
+            // 쿼리 파라미터 파싱
+            var query = ctx.Request.Url?.Query?.TrimStart('?') ?? "";
+            string? code = null, returnedState = null;
+            foreach (var pair in query.Split('&'))
+            {
+                var kv = pair.Split('=', 2);
+                if (kv.Length != 2) continue;
+                var key = Uri.UnescapeDataString(kv[0]);
+                var val = Uri.UnescapeDataString(kv[1]);
+                if (key == "code")  code = val;
+                if (key == "state") returnedState = val;
+            }
+
+            // 브라우저에 결과 페이지 전달
+            var success = !string.IsNullOrEmpty(code) && returnedState == expectedState;
+            var html = success
+                ? "<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;text-align:center;padding-top:60px'>" +
+                  "<h2 style='color:#2e7d32'>인증 완료!</h2><p>이 창을 닫고 프로그램으로 돌아가세요.</p>" +
+                  "<script>setTimeout(()=>window.close(),2000)</script></body></html>"
+                : "<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;text-align:center;padding-top:60px'>" +
+                  "<h2 style='color:#c62828'>인증 실패</h2><p>코드 또는 state가 올바르지 않습니다. 창을 닫고 다시 시도하세요.</p></body></html>";
+            var bytes = Encoding.UTF8.GetBytes(html);
+            ctx.Response.ContentType = "text/html; charset=utf-8";
+            ctx.Response.ContentLength64 = bytes.Length;
+            await ctx.Response.OutputStream.WriteAsync(bytes);
+            ctx.Response.Close();
+
+            if (!success)
+            {
+                _log.Warn($"OAuth state 불일치 또는 코드 없음 (예상={expectedState}, 수신={returnedState})");
+                return (null, true);
+            }
+
+            _log.Info("OAuth 콜백 자동 수신 완료");
+            return (code, true);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    private async Task<bool> ExchangeCodeForTokenAsync(string code)
+    {
         try
         {
             var tokenUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/token";
@@ -444,7 +563,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                 {
                     { "grant_type", "authorization_code" },
                     { "code", code },
-                    { "redirect_uri", _config.RedirectUri }
+                    { "redirect_uri", LocalCallbackUri }
                 })
             };
 
@@ -471,6 +590,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             _config.AccessToken = newAccessToken;
             if (!string.IsNullOrEmpty(newRefreshToken))
                 _config.RefreshToken = newRefreshToken;
+            _config.RedirectUri = LocalCallbackUri; // 저장된 URI도 localhost로 갱신
 
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", newAccessToken);
             _log.Info("OAuth 재인증 성공 — 새 토큰 발급 완료");
@@ -489,8 +609,8 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     {
         using var dlg = new Form
         {
-            Text = "Cafe24 OAuth 재인증",
-            Size = new Size(560, 200),
+            Text = "Cafe24 OAuth 재인증 (수동)",
+            Size = new Size(600, 230),
             StartPosition = FormStartPosition.CenterScreen,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false, MinimizeBox = false
@@ -498,12 +618,14 @@ public class Cafe24ApiClient : IMarketplaceApiClient
 
         var lbl = new Label
         {
-            Text = "브라우저에서 Cafe24 로그인 후,\n리다이렉트된 URL 전체를 아래에 붙여넣으세요.\n(예: https://...callback?code=XXXXX&state=...)",
+            Text = "브라우저에서 Cafe24 로그인 후 페이지 오류가 떠도 괜찮습니다.\n" +
+                   "브라우저 주소창의 URL 전체를 복사하여 아래에 붙여넣으세요.\n" +
+                   "주소창에 ?code=XXXXX&state=... 가 포함되어 있으면 됩니다.",
             Location = new Point(12, 12), AutoSize = true
         };
-        var txt = new TextBox { Location = new Point(12, 72), Width = 520, Height = 24 };
-        var btnOk = new Button { Text = "확인", DialogResult = DialogResult.OK, Location = new Point(370, 110), Width = 80, Height = 30 };
-        var btnCancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(454, 110), Width = 80, Height = 30 };
+        var txt = new TextBox { Location = new Point(12, 88), Width = 565, Height = 24 };
+        var btnOk = new Button { Text = "확인", DialogResult = DialogResult.OK, Location = new Point(415, 130), Width = 80, Height = 30 };
+        var btnCancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(499, 130), Width = 80, Height = 30 };
         dlg.AcceptButton = btnOk;
         dlg.CancelButton = btnCancel;
         dlg.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
@@ -512,13 +634,11 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             return null;
 
         var input = txt.Text.Trim();
-        // URL에서 code 파라미터 추출 또는 코드 직접 입력
         if (input.Contains("code="))
         {
             try
             {
-                var uri = new Uri(input);
-                var queryStr = uri.Query.TrimStart('?');
+                var queryStr = input.Contains('?') ? input[(input.IndexOf('?') + 1)..] : input;
                 foreach (var pair in queryStr.Split('&'))
                 {
                     var kv = pair.Split('=', 2);

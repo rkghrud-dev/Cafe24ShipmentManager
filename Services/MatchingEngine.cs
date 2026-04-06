@@ -5,6 +5,20 @@ namespace Cafe24ShipmentManager.Services;
 
 public class MatchingEngine
 {
+    private static readonly HashSet<string> NonSpecificFallbackNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "집",
+        "자택",
+        "회사",
+        "배송지",
+        "수령인",
+        "받는분",
+        "고객",
+        "고객님",
+        "주문자",
+        "테스트"
+    };
+
     private readonly DatabaseManager _db;
     private readonly AppLogger _log;
 
@@ -196,10 +210,11 @@ public class MatchingEngine
         foreach (var row in sheetRows)
         {
             var name = row.RecipientName?.Trim();
-            if (string.IsNullOrEmpty(name)) continue;
-            if (!nameIndex.ContainsKey(name))
-                nameIndex[name] = new();
-            nameIndex[name].Add(row);
+            if (!CanUseNameFallback(name)) continue;
+            var fallbackName = name!;
+            if (!nameIndex.ContainsKey(fallbackName))
+                nameIndex[fallbackName] = new();
+            nameIndex[fallbackName].Add(row);
         }
 
         int phoneIndexCount = phoneIndex.Values.Sum(v => v.Count);
@@ -233,7 +248,7 @@ public class MatchingEngine
             if (candidates.Count == 0 && !string.IsNullOrEmpty(order.RecipientName))
             {
                 var orderName = order.RecipientName.Trim();
-                if (nameIndex.TryGetValue(orderName, out var nameList))
+                if (CanUseNameFallback(orderName) && nameIndex.TryGetValue(orderName, out var nameList))
                 {
                     candidates.AddRange(nameList);
                     usedNameFallback = true;
@@ -432,5 +447,17 @@ public class MatchingEngine
 
         // 전화번호만 일치
         return "probable";
+    }
+
+    private static bool CanUseNameFallback(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        var trimmed = name.Trim();
+        if (trimmed.Length <= 1)
+            return false;
+
+        return !NonSpecificFallbackNames.Contains(trimmed);
     }
 }
