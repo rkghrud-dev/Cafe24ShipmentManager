@@ -1,0 +1,8 @@
+.gradle/
+.idea/
+local.properties
+/build/
+**/build/
+*.iml
+captures/
+app/src/debug/assets/seeds/

@@ -1,0 +1,64 @@
+plugins {
+    id "com.android.application"
+}
+
+def localProperties = new java.util.Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { stream ->
+        localProperties.load(stream)
+    }
+}
+
+def buildConfigString = { String value ->
+    def safe = (value ?: "").replace("\\", "\\\\").replace("\"", "\\\"")
+    return "\"${safe}\""
+}
+
+android {
+    namespace "com.rkghrud.shipapp"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.rkghrud.shipapp"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0"
+
+        buildConfigField "String", "GOOGLE_SHEETS_SPREADSHEET_ID", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSpreadsheetId", "1WgLu0RciK6NKnPjKrcxmwIq0RouUsgv1Ib06eR4SI9A"))
+        buildConfigField "String", "GOOGLE_SHEETS_SHEET_NAME", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSheetName", "출고정보"))
+        buildConfigField "String", "GOOGLE_SHEETS_CLIENT_ID", buildConfigString(localProperties.getProperty("shipapp.googleSheetsClientId", ""))
+        buildConfigField "String", "GOOGLE_SHEETS_CLIENT_SECRET", buildConfigString(localProperties.getProperty("shipapp.googleSheetsClientSecret", ""))
+        buildConfigField "String", "GOOGLE_SHEETS_REFRESH_TOKEN", buildConfigString(localProperties.getProperty("shipapp.googleSheetsRefreshToken", ""))
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    implementation "androidx.core:core:1.15.0"
+    implementation "androidx.appcompat:appcompat:1.7.0"
+    implementation "androidx.drawerlayout:drawerlayout:1.2.0"
+    implementation "com.google.android.material:material:1.12.0"
+    implementation "androidx.constraintlayout:constraintlayout:2.2.1"
+    implementation "androidx.recyclerview:recyclerview:1.4.0"
+    implementation "androidx.swiperefreshlayout:swiperefreshlayout:1.1.0"
+    implementation "androidx.work:work-runtime:2.10.1"
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
+}
