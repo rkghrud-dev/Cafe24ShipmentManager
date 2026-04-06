@@ -4,7 +4,7 @@ using Cafe24ShipmentManager.Models;
 
 namespace Cafe24ShipmentManager.Data;
 
-public class DatabaseManager
+public partial class DatabaseManager
 {
     private readonly string _connectionString;
 
@@ -147,6 +147,7 @@ public class DatabaseManager
             );
         ");
 
+        InitializeAuthTables(conn);
         EnsureSchemaUpgrades(conn);
     }
 
@@ -158,6 +159,7 @@ public class DatabaseManager
         EnsureColumnExists(conn, "match_results", "Cafe24MarketName", "TEXT DEFAULT ''");
         EnsureColumnExists(conn, "push_log", "Cafe24MallId", "TEXT DEFAULT ''");
         EnsureColumnExists(conn, "push_log", "Cafe24MarketName", "TEXT DEFAULT ''");
+        EnsureAuthSchemaUpgrades(conn);
     }
 
     private static void EnsureColumnExists(SqliteConnection conn, string tableName, string columnName, string definition)

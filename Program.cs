@@ -1,4 +1,5 @@
 using Cafe24ShipmentManager.Data;
+using Cafe24ShipmentManager.Models;
 using Cafe24ShipmentManager.Services;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json.Linq;
@@ -36,28 +37,52 @@ static class Program
             config = new JObject();
         }
 
-        var gsSection = config["GoogleSheets"];
-        var credentialPath = ResolvePath(gsSection?["CredentialPath"]?.ToString() ?? "");
-        var spreadsheetId = gsSection?["SpreadsheetId"]?.ToString() ?? "";
-        var defaultSheetName = gsSection?["DefaultSheetName"]?.ToString() ?? "";
-
         var dbConnStrRaw = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
         var dbConnStr = NormalizeSqliteConnectionString(dbConnStrRaw);
         var logDir = ResolvePath(config["Logging"]?["LogDirectory"]?.ToString() ?? "logs");
         var logger = new AppLogger(logDir);
+        var db = new DatabaseManager(dbConnStr);
+        var authService = new AuthService(db, logger);
+        var userSettingsService = new UserSettingsService(db, logger);
 
-        var marketClients = BuildMarketplaceClients(configPath, config, logger);
+        var currentUser = authService.TryAutoLogin();
+        if (currentUser == null)
+        {
+            using var loginForm = new LoginForm(authService, userSettingsService);
+            if (loginForm.ShowDialog() != DialogResult.OK || loginForm.AuthenticatedUser == null)
+                return;
+
+            currentUser = loginForm.AuthenticatedUser;
+        }
+
+        if (!userSettingsService.IsAdminUser(currentUser) && !userSettingsService.HasMarketplaceConfiguration(currentUser.Id))
+        {
+            MessageBox.Show("이 계정은 아직 마켓 키가 없습니다. 먼저 사용자별 키를 저장하세요.",
+                "키 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            using var profileForm = new UserProfileForm(currentUser, userSettingsService, requireMarketplaceConfig: true);
+            if (profileForm.ShowDialog() != DialogResult.OK)
+                return;
+        }
+
+        logger.Info($"로그인 사용자: {currentUser.UserName}");
+
+        var effectiveConfig = userSettingsService.BuildEffectiveConfig(config, currentUser);
+        var gsSection = effectiveConfig["GoogleSheets"];
+        var credentialPath = ResolvePath(gsSection?["CredentialPath"]?.ToString() ?? "");
+        var spreadsheetId = gsSection?["SpreadsheetId"]?.ToString() ?? "";
+        var defaultSheetName = gsSection?["DefaultSheetName"]?.ToString() ?? "";
+
+        var marketClients = BuildMarketplaceClients(configPath, effectiveConfig, logger);
         if (marketClients.Count == 0)
         {
-            MessageBox.Show("활성화된 마켓 API 설정을 찾지 못했습니다. appsettings.json을 확인하세요.",
+            MessageBox.Show("활성화된 마켓 API 설정을 찾지 못했습니다. 관리자 또는 현재 로그인 계정의 키 설정을 확인하세요.",
                 "마켓 설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
         logger.Info($"연동 마켓: {string.Join(", ", marketClients.Select(client => $"{client.DisplayName}({client.SourceKey})"))}");
-
-        var db = new DatabaseManager(dbConnStr);
-        Application.Run(new MainForm(db, logger, marketClients, credentialPath, spreadsheetId, defaultSheetName));
+        Application.Run(new MainForm(db, logger, marketClients, credentialPath, spreadsheetId, defaultSheetName, currentUser, userSettingsService));
     }
 
     private static List<IMarketplaceApiClient> BuildMarketplaceClients(string configPath, JObject config, AppLogger logger)
@@ -203,4 +228,3 @@ static class Program
         return builder.ToString();
     }
 }
-

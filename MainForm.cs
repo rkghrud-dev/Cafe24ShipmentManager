@@ -3,6 +3,7 @@ using Cafe24ShipmentManager.Data;
 using Cafe24ShipmentManager.Models;
 using Cafe24ShipmentManager.Services;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace Cafe24ShipmentManager;
 
@@ -19,6 +20,8 @@ public partial class MainForm : Form
     private readonly string _credentialPath;
     private readonly string _spreadsheetId;
     private readonly string _defaultSheetName;
+    private readonly AppUser _currentUser;
+    private readonly UserSettingsService _userSettingsService;
     private const string StockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
     private const int StockDefaultSheetGid = 2073400281;
 
@@ -32,6 +35,7 @@ public partial class MainForm : Form
     // ── Top Bar (공통) ──
     private ComboBox cboSheet = null!;
     private Label lblStatus = null!;
+    private Button btnUserSettings = null!;
 
     // ── 출고 탭 컨트롤 ──
     private CheckedListBox clbVendors = null!;
@@ -65,7 +69,8 @@ public partial class MainForm : Form
     private TextBox txtLog = null!;
 
     public MainForm(DatabaseManager db, AppLogger log, IReadOnlyList<IMarketplaceApiClient> marketClients,
-                    string credentialPath, string spreadsheetId, string defaultSheetName)
+                    string credentialPath, string spreadsheetId, string defaultSheetName, AppUser currentUser,
+                    UserSettingsService userSettingsService)
     {
         _db = db;
         _log = log;
@@ -81,6 +86,8 @@ public partial class MainForm : Form
         _credentialPath = credentialPath;
         _spreadsheetId = spreadsheetId;
         _defaultSheetName = defaultSheetName;
+        _currentUser = currentUser;
+        _userSettingsService = userSettingsService;
 
         InitializeUI();
         WireEvents();
@@ -240,7 +247,7 @@ public partial class MainForm : Form
     // ═══════════════════════════════════════
     private void InitializeUI()
     {
-        Text = "마켓 출고/송장 관리 매니저";
+        Text = $"마켓 출고/송장 관리 매니저 [{_currentUser.EffectiveDisplayName}]";
         Size = new Size(1400, 950);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("맑은 고딕", 9f);
@@ -250,7 +257,15 @@ public partial class MainForm : Form
         var lblSheet = new Label { Text = "시트:", Location = new Point(8, 9), AutoSize = true };
         cboSheet = new ComboBox { Location = new Point(42, 5), Width = 180, DropDownStyle = ComboBoxStyle.DropDownList };
         lblStatus = new Label { Text = "초기화 중...", Location = new Point(235, 9), AutoSize = true, ForeColor = Color.Gray };
-        topBar.Controls.AddRange(new Control[] { lblSheet, cboSheet, lblStatus });
+        btnUserSettings = new Button
+        {
+            Text = "내 키 설정",
+            Location = new Point(1265, 4),
+            Width = 100,
+            Height = 28,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        topBar.Controls.AddRange(new Control[] { lblSheet, cboSheet, lblStatus, btnUserSettings });
 
         // ═══ 메인 탭 ═══
         tabMain = new TabControl { Dock = DockStyle.Fill };
@@ -545,6 +560,7 @@ public partial class MainForm : Form
         btnMatch.Click += async (_, _) => await ExecuteMatchingAsync();
         btnPush.Click += async (_, _) => await ExecutePushAsync();
         btnExportFailed.Click += (_, _) => ExportFailed();
+        btnUserSettings.Click += (_, _) => OpenUserSettings();
         if (btnStockLoad != null) btnStockLoad.Click += async (_, _) => await LoadStockSheetPreviewAsync();
     }
 
@@ -1035,6 +1051,20 @@ public partial class MainForm : Form
                    string.Equals(order.OrderId, matchResult.Cafe24OrderId, StringComparison.OrdinalIgnoreCase));
     }
 
+    private void OpenUserSettings()
+    {
+        using var profileForm = new UserProfileForm(
+            _currentUser,
+            _userSettingsService,
+            requireMarketplaceConfig: !_userSettingsService.IsAdminUser(_currentUser));
+
+        if (profileForm.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        MessageBox.Show("키 설정이 저장되었습니다. 다음 로그인부터 적용됩니다.",
+            "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
     private string? GetSelectedShippingCompanyName()
     {
         return cboShippingCompany.SelectedItem?.ToString();
@@ -1107,6 +1137,8 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
+
+
 
 
 
