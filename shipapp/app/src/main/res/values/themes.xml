@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="TextAppearance.DispatchTitle" parent="TextAppearance.MaterialComponents.Headline6">
+        <item name="android:textColor">@color/ship_text_primary</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
     <style name="Theme.ShipApp" parent="Theme.Material3.Light.NoActionBar">
         <item name="colorPrimary">@color/ship_primary</item>
         <item name="colorOnPrimary">@color/ship_on_primary</item>

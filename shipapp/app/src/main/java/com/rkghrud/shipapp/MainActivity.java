@@ -1,10 +1,14 @@
 package com.rkghrud.shipapp;
 
 import android.Manifest;
+import androidx.appcompat.app.AlertDialog;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.View;
 import android.widget.AdapterView;
@@ -19,7 +23,6 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.core.content.ContextCompat;
@@ -29,6 +32,8 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.rkghrud.shipapp.data.AlertPrefs;
+import com.rkghrud.shipapp.data.Cafe24MarketConfig;
 import com.rkghrud.shipapp.data.CoupangCredentials;
 import com.rkghrud.shipapp.data.CredentialStore;
 import com.rkghrud.shipapp.data.DebugSeedLoader;
@@ -38,6 +43,7 @@ import com.rkghrud.shipapp.data.LiveShipmentRepository;
 import com.rkghrud.shipapp.data.TrackingSpreadsheetImporter;
 import com.rkghrud.shipapp.notifications.NotificationHelper;
 import com.rkghrud.shipapp.ui.DispatchOrderAdapter;
+import com.rkghrud.shipapp.ui.OrderDetailDialog;
 import com.rkghrud.shipapp.workers.ShipmentAlertWorker;
 
 import org.json.JSONObject;
@@ -54,28 +60,21 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String PREFS_NAME = "shipapp_prefs";
-    private static final String PREF_ALERTS_ENABLED = "alerts_enabled";
-    private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
-
     private static final int STATUS_OFFLINE = 0;
     private static final int STATUS_ONLINE = 1;
     private static final int STATUS_WARNING = 2;
 
     private static final String FILTER_ALL = "all";
-    private static final String[] MARKET_FILTER_LABELS = {"전체보기", "홈런", "준비몰", "쿠팡"};
-    private static final String[] MARKET_FILTER_KEYS = {
-            FILTER_ALL,
-            CredentialStore.SLOT_CAFE24_HOME,
-            CredentialStore.SLOT_CAFE24_PREPARE,
-            "coupang"
-    };
+    private static final String COUPANG_KEY = "coupang";
+    private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
     private static final String[] PAGE_SIZE_LABELS = {"5개씩 보기", "10개씩 보기", "20개씩 보기", "100개씩 보기"};
     private static final int[] PAGE_SIZES = {5, 10, 20, 100};
 
@@ -83,6 +82,7 @@ public class MainActivity extends AppCompatActivity {
     private LiveShipmentRepository repository;
     private DispatchOrderAdapter adapter;
     private ExecutorService executorService;
+    private ArrayAdapter<String> marketAdapter;
 
     private SwipeRefreshLayout swipeRefreshLayout;
     private TextView aggregateStatusView;
@@ -99,11 +99,14 @@ public class MainActivity extends AppCompatActivity {
 
     private final List<DispatchOrder> allOrders = new ArrayList<>();
     private final List<DispatchOrder> displayedOrders = new ArrayList<>();
-    private boolean suppressSelectAllCallback = false;
-    private String pendingCafe24Slot = CredentialStore.SLOT_CAFE24_HOME;
+    private final List<String> marketFilterLabels = new ArrayList<>();
+    private final List<String> marketFilterKeys = new ArrayList<>();
+    private final List<String> currentActiveCafe24Keys = new ArrayList<>();
+    private final Map<String, String> currentCafe24Statuses = new LinkedHashMap<>();
 
-    private String currentHomeStatus = "";
-    private String currentPrepareStatus = "";
+    private boolean suppressSelectAllCallback = false;
+    private String pendingCafe24Slot = "";
+    private String pendingCafe24Name = "";
     private String currentCoupangStatus = "";
     private String currentUpdatedAt = "-";
     private int currentConnectedCount = 0;
@@ -129,7 +132,7 @@ public class MainActivity extends AppCompatActivity {
         credentialStore = new CredentialStore(this);
         repository = new LiveShipmentRepository(this);
         executorService = Executors.newSingleThreadExecutor();
-        NotificationHelper.ensureChannel(this);
+        NotificationHelper.ensureChannels(this);
         requestNotificationPermissionIfNeeded();
 
         swipeRefreshLayout = findViewById(R.id.swipeRefresh);
@@ -148,15 +151,16 @@ public class MainActivity extends AppCompatActivity {
 
         adapter = new DispatchOrderAdapter();
         adapter.setOnSelectionChanged(this::updateSelectionUi);
+        adapter.setOnItemClick(this::showOrderDetail);
         ordersRecyclerView.setLayoutManager(new LinearLayoutManager(this));
         ordersRecyclerView.setAdapter(adapter);
 
         findViewById(R.id.btnOpenSettings).setOnClickListener(v -> showSettingsDialog());
 
-        ArrayAdapter<String> marketAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, MARKET_FILTER_LABELS);
+        marketAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, new ArrayList<>());
         marketAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         marketFilterSpinner.setAdapter(marketAdapter);
+        refreshMarketFilterOptions(FILTER_ALL);
 
         ArrayAdapter<String> pageAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_spinner_item, PAGE_SIZE_LABELS);
@@ -214,42 +218,28 @@ public class MainActivity extends AppCompatActivity {
         LocalDate endDate = LocalDate.now(SEOUL);
         LocalDate startDate = endDate.minusDays(14);
 
-        if (credentialStore.hasCafe24Slot(CredentialStore.SLOT_CAFE24_HOME)) {
-            result.connectedCount++;
-            try {
-                List<DispatchOrder> homeOrders = repository.fetchOrdersForDispatch(
-                        CredentialStore.SLOT_CAFE24_HOME, startDate, endDate);
-                result.orders.addAll(homeOrders);
-                result.homeStatus = "홈런마켓 Cafe24\n조회 성공 " + homeOrders.size() + "건";
-                result.fetchedCount++;
-            } catch (Exception ex) {
-                result.homeStatus = "홈런마켓 Cafe24\n확인 필요\n" + clipMessage(ex.getMessage());
-                result.errors.add("홈런 조회 실패: " + ex.getMessage());
-            }
-        } else {
-            result.homeStatus = credentialStore.getCafe24Status(CredentialStore.SLOT_CAFE24_HOME, "홈런마켓 Cafe24");
+        for (Cafe24MarketConfig config : credentialStore.getCafe24Markets()) {
+            result.cafe24Statuses.put(config.key, credentialStore.getCafe24Status(config.key));
         }
 
-        if (credentialStore.hasCafe24Slot(CredentialStore.SLOT_CAFE24_PREPARE)) {
+        for (Cafe24MarketConfig config : credentialStore.getActiveCafe24Markets()) {
+            result.activeCafe24Keys.add(config.key);
             result.connectedCount++;
             try {
-                List<DispatchOrder> prepareOrders = repository.fetchOrdersForDispatch(
-                        CredentialStore.SLOT_CAFE24_PREPARE, startDate, endDate);
-                result.orders.addAll(prepareOrders);
-                result.prepareStatus = "준비몰 Cafe24\n조회 성공 " + prepareOrders.size() + "건";
+                List<DispatchOrder> orders = repository.fetchOrdersForDispatch(config.key, startDate, endDate);
+                result.orders.addAll(orders);
+                result.cafe24Statuses.put(config.key, config.buildMarketLabel() + "\n조회 성공 " + orders.size() + "건");
                 result.fetchedCount++;
             } catch (Exception ex) {
-                result.prepareStatus = "준비몰 Cafe24\n확인 필요\n" + clipMessage(ex.getMessage());
-                result.errors.add("준비몰 조회 실패: " + ex.getMessage());
+                result.cafe24Statuses.put(config.key, config.buildMarketLabel() + "\n확인 필요\n" + clipMessage(ex.getMessage()));
+                result.errors.add(config.displayName + " 조회 실패: " + ex.getMessage());
             }
-        } else {
-            result.prepareStatus = credentialStore.getCafe24Status(CredentialStore.SLOT_CAFE24_PREPARE, "준비몰 Cafe24");
         }
 
         if (credentialStore.getCoupangCredentials().isComplete()) {
             result.connectedCount++;
             try {
-                List<DispatchOrder> coupangOrders = repository.fetchOrdersForDispatch("coupang", startDate, endDate);
+                List<DispatchOrder> coupangOrders = repository.fetchOrdersForDispatch(COUPANG_KEY, startDate, endDate);
                 result.orders.addAll(coupangOrders);
                 result.coupangStatus = "쿠팡\n조회 성공 " + coupangOrders.size() + "건";
                 result.fetchedCount++;
@@ -269,17 +259,22 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void applyDispatchLoadResult(DispatchLoadResult result) {
+        String selectedFilter = getSelectedMarketFilter();
+
         allOrders.clear();
         allOrders.addAll(result.orders);
 
-        currentHomeStatus = result.homeStatus;
-        currentPrepareStatus = result.prepareStatus;
+        currentCafe24Statuses.clear();
+        currentCafe24Statuses.putAll(result.cafe24Statuses);
+        currentActiveCafe24Keys.clear();
+        currentActiveCafe24Keys.addAll(result.activeCafe24Keys);
         currentCoupangStatus = result.coupangStatus;
         currentConnectedCount = result.connectedCount;
         currentFetchedCount = result.fetchedCount;
         currentTotalCount = result.totalCount;
         currentUpdatedAt = result.updatedAt;
 
+        refreshMarketFilterOptions(selectedFilter);
         updateHeaderUi();
         applyFilters();
         setLoading(false);
@@ -288,17 +283,28 @@ public class MainActivity extends AppCompatActivity {
             showToast("일부 판매처 조회에 실패했습니다. 설정에서 상태를 확인하세요.");
         }
     }
+
     private void showCredentialOnlyStatus() {
-        currentHomeStatus = credentialStore.getCafe24Status(CredentialStore.SLOT_CAFE24_HOME, "홈런마켓 Cafe24");
-        currentPrepareStatus = credentialStore.getCafe24Status(CredentialStore.SLOT_CAFE24_PREPARE, "준비몰 Cafe24");
+        String selectedFilter = getSelectedMarketFilter();
+
+        currentCafe24Statuses.clear();
+        for (Cafe24MarketConfig config : credentialStore.getCafe24Markets()) {
+            currentCafe24Statuses.put(config.key, credentialStore.getCafe24Status(config.key));
+        }
+        currentActiveCafe24Keys.clear();
+        for (Cafe24MarketConfig config : credentialStore.getActiveCafe24Markets()) {
+            currentActiveCafe24Keys.add(config.key);
+        }
+
         currentCoupangStatus = credentialStore.getCoupangStatus();
-        currentConnectedCount = credentialStore.getConnectedSourceCount();
+        currentConnectedCount = currentActiveCafe24Keys.size() + (credentialStore.getCoupangCredentials().isComplete() ? 1 : 0);
         currentFetchedCount = 0;
         currentTotalCount = 0;
         currentFilteredCount = 0;
         currentUpdatedAt = "-";
         allOrders.clear();
         displayedOrders.clear();
+        refreshMarketFilterOptions(selectedFilter);
         updateHeaderUi();
         adapter.setItems(Collections.emptyList());
         updateEmptyState();
@@ -336,19 +342,21 @@ public class MainActivity extends AppCompatActivity {
         if (currentConnectedCount == 0) {
             return STATUS_OFFLINE;
         }
-        if (hasConnectedWarning(CredentialStore.SLOT_CAFE24_HOME, currentHomeStatus)
-                || hasConnectedWarning(CredentialStore.SLOT_CAFE24_PREPARE, currentPrepareStatus)
-                || hasConnectedWarning("coupang", currentCoupangStatus)
-                || currentFetchedCount < currentConnectedCount) {
+        for (String marketKey : currentActiveCafe24Keys) {
+            if (hasStatusWarning(resolveCafe24Status(marketKey))) {
+                return STATUS_WARNING;
+            }
+        }
+        if (credentialStore.getCoupangCredentials().isComplete() && hasStatusWarning(currentCoupangStatus)) {
+            return STATUS_WARNING;
+        }
+        if (currentFetchedCount < currentConnectedCount) {
             return STATUS_WARNING;
         }
         return STATUS_ONLINE;
     }
 
-    private boolean hasConnectedWarning(String marketKey, String status) {
-        if (!isMarketConnected(marketKey)) {
-            return false;
-        }
+    private boolean hasStatusWarning(String status) {
         if (status == null || status.trim().isEmpty()) {
             return true;
         }
@@ -359,11 +367,32 @@ public class MainActivity extends AppCompatActivity {
                 || status.contains("미연결");
     }
 
-    private boolean isMarketConnected(String marketKey) {
-        if ("coupang".equals(marketKey)) {
-            return credentialStore.getCoupangCredentials().isComplete();
+    private void refreshMarketFilterOptions(String preferredKey) {
+        String selectedKey = safeText(preferredKey);
+        if (selectedKey.isEmpty()) {
+            selectedKey = FILTER_ALL;
         }
-        return credentialStore.hasCafe24Slot(marketKey);
+
+        marketFilterLabels.clear();
+        marketFilterKeys.clear();
+        marketFilterLabels.add("전체보기");
+        marketFilterKeys.add(FILTER_ALL);
+
+        for (Cafe24MarketConfig config : credentialStore.getActiveCafe24Markets()) {
+            marketFilterLabels.add(config.displayName);
+            marketFilterKeys.add(config.key);
+        }
+        if (credentialStore.getCoupangCredentials().isComplete()) {
+            marketFilterLabels.add("쿠팡");
+            marketFilterKeys.add(COUPANG_KEY);
+        }
+
+        marketAdapter.clear();
+        marketAdapter.addAll(marketFilterLabels);
+        marketAdapter.notifyDataSetChanged();
+
+        int selectedIndex = marketFilterKeys.indexOf(selectedKey);
+        marketFilterSpinner.setSelection(selectedIndex >= 0 ? selectedIndex : 0, false);
     }
 
     private void applyFilters() {
@@ -393,11 +422,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String getSelectedMarketFilter() {
-        int position = marketFilterSpinner.getSelectedItemPosition();
-        if (position < 0 || position >= MARKET_FILTER_KEYS.length) {
+        int position = marketFilterSpinner == null ? -1 : marketFilterSpinner.getSelectedItemPosition();
+        if (position < 0 || position >= marketFilterKeys.size()) {
             return FILTER_ALL;
         }
-        return MARKET_FILTER_KEYS[position];
+        return marketFilterKeys.get(position);
     }
 
     private int getSelectedPageSize() {
@@ -466,7 +495,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateEmptyState() {
         if (currentConnectedCount == 0) {
-            emptyStateView.setText("설정에서 판매처 키를 먼저 연결하세요.");
+            emptyStateView.setText("설정에서 표시할 판매처를 체크하고 JSON을 연결하세요.");
             emptyStateView.setVisibility(View.VISIBLE);
             return;
         }
@@ -482,6 +511,7 @@ public class MainActivity extends AppCompatActivity {
         }
         emptyStateView.setVisibility(View.GONE);
     }
+
     private void launchSpreadsheetImport() {
         if (allOrders.isEmpty()) {
             showToast("먼저 주문을 조회하세요.");
@@ -605,24 +635,20 @@ public class MainActivity extends AppCompatActivity {
                 .setPositiveButton("확인", (dialog, which) -> refreshOrders())
                 .show();
     }
+
     private void showSettingsDialog() {
         View dialogView = getLayoutInflater().inflate(R.layout.dialog_settings, null);
 
         TextView summaryView = dialogView.findViewById(R.id.tvSettingsSummary);
-        TextView homeStatusView = dialogView.findViewById(R.id.tvSettingsCafe24HomeStatus);
-        TextView prepareStatusView = dialogView.findViewById(R.id.tvSettingsCafe24PrepareStatus);
         TextView coupangStatusView = dialogView.findViewById(R.id.tvSettingsCoupangStatus);
         TextView lastUpdatedView = dialogView.findViewById(R.id.tvSettingsLastUpdated);
-        SwitchCompat alertsSwitch = dialogView.findViewById(R.id.switchSettingsAlerts);
+        LinearLayout marketContainer = dialogView.findViewById(R.id.layoutCafe24Markets);
 
         summaryView.setText(buildSettingsSummary());
-        homeStatusView.setText(currentHomeStatus);
-        prepareStatusView.setText(currentPrepareStatus);
         coupangStatusView.setText(currentCoupangStatus);
         lastUpdatedView.setText(getString(R.string.last_updated_format, currentUpdatedAt));
 
-        alertsSwitch.setChecked(areAlertsEnabled());
-        alertsSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> setAlertsEnabled(isChecked));
+        configureAlertSettings(dialogView);
 
         AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.settings_title)
@@ -630,17 +656,15 @@ public class MainActivity extends AppCompatActivity {
                 .setPositiveButton(android.R.string.ok, null)
                 .create();
 
+        populateCafe24MarketRows(marketContainer, dialog);
+
+        dialogView.findViewById(R.id.btnSettingsAddCafe24Market).setOnClickListener(v -> {
+            dialog.dismiss();
+            showAddCafe24MarketDialog();
+        });
         dialogView.findViewById(R.id.btnSettingsLoadDebugSeeds).setOnClickListener(v -> {
             dialog.dismiss();
             loadDebugSeeds();
-        });
-        dialogView.findViewById(R.id.btnSettingsImportCafe24Home).setOnClickListener(v -> {
-            dialog.dismiss();
-            launchCafe24Import(CredentialStore.SLOT_CAFE24_HOME);
-        });
-        dialogView.findViewById(R.id.btnSettingsImportCafe24Prepare).setOnClickListener(v -> {
-            dialog.dismiss();
-            launchCafe24Import(CredentialStore.SLOT_CAFE24_PREPARE);
         });
         dialogView.findViewById(R.id.btnSettingsEditCoupang).setOnClickListener(v -> {
             dialog.dismiss();
@@ -656,56 +680,310 @@ public class MainActivity extends AppCompatActivity {
         dialog.show();
     }
 
+    private void configureAlertSettings(View dialogView) {
+        SwitchCompat switchPolling = dialogView.findViewById(R.id.switchPollingAlert);
+        View layoutInterval = dialogView.findViewById(R.id.layoutPollingInterval);
+        MaterialButton btn10 = dialogView.findViewById(R.id.btn10min);
+        MaterialButton btn20 = dialogView.findViewById(R.id.btn20min);
+        MaterialButton btn30 = dialogView.findViewById(R.id.btn30min);
+
+        boolean pollingEnabled = AlertPrefs.isPollingEnabled(this);
+        int pollingMin = AlertPrefs.getPollingInterval(this);
+        switchPolling.setChecked(pollingEnabled);
+        layoutInterval.setVisibility(pollingEnabled ? View.VISIBLE : View.GONE);
+        highlightIntervalButton(btn10, btn20, btn30, pollingMin);
+
+        switchPolling.setOnCheckedChangeListener((button, checked) -> {
+            AlertPrefs.prefs(this).edit().putBoolean(AlertPrefs.KEY_POLLING_ENABLED, checked).apply();
+            layoutInterval.setVisibility(checked ? View.VISIBLE : View.GONE);
+            applyPollingSchedule(checked);
+        });
+        View.OnClickListener intervalClick = v -> {
+            int min = (v == btn10) ? 15 : (v == btn20) ? 20 : 30;
+            AlertPrefs.prefs(this).edit().putInt(AlertPrefs.KEY_POLLING_INTERVAL, min).apply();
+            highlightIntervalButton(btn10, btn20, btn30, min);
+            if (AlertPrefs.isPollingEnabled(this)) {
+                applyPollingSchedule(true);
+            }
+        };
+        btn10.setOnClickListener(intervalClick);
+        btn20.setOnClickListener(intervalClick);
+        btn30.setOnClickListener(intervalClick);
+
+        SwitchCompat switchScheduled = dialogView.findViewById(R.id.switchScheduledAlert);
+        View layoutScheduled = dialogView.findViewById(R.id.layoutScheduled);
+        MaterialButton btnTime = dialogView.findViewById(R.id.btnScheduledTime);
+        MaterialButton[] dayButtons = {
+                dialogView.findViewById(R.id.btnDayMon),
+                dialogView.findViewById(R.id.btnDayTue),
+                dialogView.findViewById(R.id.btnDayWed),
+                dialogView.findViewById(R.id.btnDayThu),
+                dialogView.findViewById(R.id.btnDayFri),
+                dialogView.findViewById(R.id.btnDaySat),
+                dialogView.findViewById(R.id.btnDaySun)
+        };
+
+        boolean scheduledEnabled = AlertPrefs.isScheduledEnabled(this);
+        switchScheduled.setChecked(scheduledEnabled);
+        layoutScheduled.setVisibility(scheduledEnabled ? View.VISIBLE : View.GONE);
+        btnTime.setText(String.format(Locale.US, "%02d:%02d",
+                AlertPrefs.getScheduledHour(this), AlertPrefs.getScheduledMinute(this)));
+        applyDayButtonColors(dayButtons, AlertPrefs.getScheduledDays(this));
+
+        switchScheduled.setOnCheckedChangeListener((button, checked) -> {
+            AlertPrefs.prefs(this).edit().putBoolean(AlertPrefs.KEY_SCHEDULED_ENABLED, checked).apply();
+            layoutScheduled.setVisibility(checked ? View.VISIBLE : View.GONE);
+            if (checked && !AlertPrefs.hasScheduledDays(this)) {
+                showToast("요일을 하나 이상 선택해야 지정 시간 알림이 동작합니다.");
+            }
+            applyScheduledAlarm(checked);
+        });
+        btnTime.setOnClickListener(v -> {
+            int hour = AlertPrefs.getScheduledHour(this);
+            int minute = AlertPrefs.getScheduledMinute(this);
+            new android.app.TimePickerDialog(this, (timePicker, selectedHour, selectedMinute) -> {
+                AlertPrefs.prefs(this).edit()
+                        .putInt(AlertPrefs.KEY_SCHEDULED_HOUR, selectedHour)
+                        .putInt(AlertPrefs.KEY_SCHEDULED_MINUTE, selectedMinute)
+                        .apply();
+                btnTime.setText(String.format(Locale.US, "%02d:%02d", selectedHour, selectedMinute));
+                if (AlertPrefs.isScheduledEnabled(this)) {
+                    applyScheduledAlarm(true);
+                }
+            }, hour, minute, true).show();
+        });
+        for (int i = 0; i < dayButtons.length; i++) {
+            final int bit = i;
+            dayButtons[i].setOnClickListener(v -> {
+                int days = AlertPrefs.getScheduledDays(this) ^ (1 << bit);
+                AlertPrefs.prefs(this).edit().putInt(AlertPrefs.KEY_SCHEDULED_DAYS, days).apply();
+                applyDayButtonColors(dayButtons, days);
+                if (AlertPrefs.isScheduledEnabled(this)) {
+                    if (!AlertPrefs.hasScheduledDays(days)) {
+                        showToast("요일이 선택되지 않아 지정 시간 알림을 중지합니다.");
+                    }
+                    applyScheduledAlarm(true);
+                }
+            });
+        }
+
+        SwitchCompat switchVibrate = dialogView.findViewById(R.id.switchVibrate);
+        switchVibrate.setChecked(AlertPrefs.isVibrateEnabled(this));
+        switchVibrate.setOnCheckedChangeListener((button, checked) ->
+                AlertPrefs.prefs(this).edit().putBoolean(AlertPrefs.KEY_VIBRATE, checked).apply());
+    }
+
+    private void populateCafe24MarketRows(LinearLayout container, AlertDialog dialog) {
+        container.removeAllViews();
+        List<Cafe24MarketConfig> markets = credentialStore.getCafe24Markets();
+        if (markets.isEmpty()) {
+            TextView emptyView = new TextView(this);
+            emptyView.setText("등록된 Cafe24 판매처가 없습니다. 판매처를 추가해 주세요.");
+            emptyView.setTextColor(ContextCompat.getColor(this, R.color.ship_text_secondary));
+            emptyView.setTextSize(12f);
+            emptyView.setPadding(0, 8, 0, 8);
+            container.addView(emptyView);
+            return;
+        }
+
+        for (Cafe24MarketConfig config : markets) {
+            View itemView = getLayoutInflater().inflate(R.layout.item_settings_market, container, false);
+            CheckBox enabledCheckBox = itemView.findViewById(R.id.cbMarketConfigEnabled);
+            TextView nameView = itemView.findViewById(R.id.tvMarketConfigName);
+            TextView pathView = itemView.findViewById(R.id.tvMarketConfigPath);
+            TextView statusView = itemView.findViewById(R.id.tvMarketConfigStatus);
+
+            enabledCheckBox.setChecked(config.enabled);
+            nameView.setText(config.buildMarketLabel());
+            pathView.setText(buildMarketSourceText(config));
+            statusView.setText(resolveCafe24Status(config.key));
+
+            enabledCheckBox.setOnClickListener(v -> {
+                credentialStore.setCafe24MarketEnabled(config.key, enabledCheckBox.isChecked());
+                dialog.dismiss();
+                refreshOrders();
+            });
+            itemView.findViewById(R.id.btnMarketConfigJson).setOnClickListener(v -> {
+                dialog.dismiss();
+                launchCafe24Import(config.key, config.displayName);
+            });
+            itemView.findViewById(R.id.btnMarketConfigRename).setOnClickListener(v -> {
+                dialog.dismiss();
+                showRenameCafe24MarketDialog(config);
+            });
+            itemView.findViewById(R.id.btnMarketConfigDelete).setOnClickListener(v -> {
+                dialog.dismiss();
+                confirmDeleteCafe24Market(config);
+            });
+
+            container.addView(itemView);
+        }
+    }
+
+    private String buildMarketSourceText(Cafe24MarketConfig config) {
+        if (!config.hasJson()) {
+            return "JSON 위치: 미연결";
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("파일: ").append(config.sourceLabel.isEmpty() ? "선택된 파일 없음" : config.sourceLabel);
+        if (!config.sourceUri.isEmpty()) {
+            builder.append("\n위치: ").append(config.sourceUri);
+        }
+        return builder.toString();
+    }
+
+    private String resolveCafe24Status(String marketKey) {
+        String status = currentCafe24Statuses.get(marketKey);
+        if (status != null && !status.trim().isEmpty()) {
+            return status;
+        }
+        return credentialStore.getCafe24Status(marketKey);
+    }
+
+    private void showAddCafe24MarketDialog() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        int padding = dpToPx(20);
+        container.setPadding(padding, dpToPx(8), padding, 0);
+
+        EditText nameInput = buildTextInput("판매처명", "");
+        container.addView(nameInput);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("판매처 추가")
+                .setMessage("이 이름은 구글시트 발주사 매칭에 사용됩니다.")
+                .setView(container)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("추가", (dialog, which) -> {
+                    String name = safeText(nameInput.getText().toString());
+                    if (name.isEmpty()) {
+                        showToast("판매처명을 입력하세요.");
+                        return;
+                    }
+                    try {
+                        Cafe24MarketConfig created = credentialStore.createCafe24Market(name);
+                        showToast(name + " 판매처를 추가했습니다. 이어서 JSON을 선택하세요.");
+                        launchCafe24Import(created.key, created.displayName);
+                        showCredentialOnlyStatus();
+                    } catch (Exception ex) {
+                        showToast(ex.getMessage());
+                    }
+                })
+                .show();
+    }
+
+    private void showRenameCafe24MarketDialog(Cafe24MarketConfig config) {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        int padding = dpToPx(20);
+        container.setPadding(padding, dpToPx(8), padding, 0);
+
+        EditText nameInput = buildTextInput("판매처명", config.displayName);
+        container.addView(nameInput);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("판매처명 수정")
+                .setView(container)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("저장", (dialog, which) -> {
+                    String name = safeText(nameInput.getText().toString());
+                    if (name.isEmpty()) {
+                        showToast("판매처명을 입력하세요.");
+                        return;
+                    }
+                    try {
+                        credentialStore.renameCafe24Market(config.key, name);
+                        showToast("판매처명을 수정했습니다.");
+                        refreshOrders();
+                    } catch (Exception ex) {
+                        showToast(ex.getMessage());
+                    }
+                })
+                .show();
+    }
+
+    private void confirmDeleteCafe24Market(Cafe24MarketConfig config) {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("판매처 삭제")
+                .setMessage(config.displayName + " 판매처를 삭제하시겠습니까? 저장된 JSON도 같이 제거됩니다.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("삭제", (dialog, which) -> {
+                    credentialStore.deleteCafe24Market(config.key);
+                    showToast("판매처를 삭제했습니다.");
+                    refreshOrders();
+                })
+                .show();
+    }
+
+    private void highlightIntervalButton(MaterialButton b10, MaterialButton b20, MaterialButton b30, int selected) {
+        int activeColor = getResources().getColor(R.color.ship_primary, getTheme());
+        int defaultColor = getResources().getColor(R.color.ship_text_secondary, getTheme());
+        b10.setTextColor(selected == 15 ? activeColor : defaultColor);
+        b20.setTextColor(selected == 20 ? activeColor : defaultColor);
+        b30.setTextColor(selected == 30 ? activeColor : defaultColor);
+    }
+
+    private void applyDayButtonColors(MaterialButton[] buttons, int days) {
+        int activeColor = getResources().getColor(R.color.ship_primary, getTheme());
+        int defaultColor = getResources().getColor(R.color.ship_text_secondary, getTheme());
+        for (int i = 0; i < buttons.length; i++) {
+            buttons[i].setTextColor(((days >> i) & 1) == 1 ? activeColor : defaultColor);
+        }
+    }
+
     private String buildSettingsSummary() {
-        if (currentConnectedCount == 0) {
+        int registeredCafe24Count = credentialStore.getRegisteredCafe24Count();
+        int enabledCafe24Count = credentialStore.getEnabledCafe24Count();
+        int connectedCafe24Count = credentialStore.getConnectedCafe24Count();
+        boolean coupangConnected = credentialStore.getCoupangCredentials().isComplete();
+
+        if (registeredCafe24Count == 0 && !coupangConnected) {
             return getString(R.string.settings_summary_empty);
         }
 
         StringBuilder summary = new StringBuilder();
-        summary.append("판매처 ").append(currentConnectedCount).append("개 연결");
+        summary.append("Cafe24 등록 ").append(registeredCafe24Count).append("개")
+                .append(" / 표시 ").append(enabledCafe24Count).append("개")
+                .append(" / JSON 연결 ").append(connectedCafe24Count).append("개")
+                .append(" / 쿠팡 ").append(coupangConnected ? "연결" : "미연결");
         if (currentFetchedCount > 0) {
             summary.append(" / 조회 성공 ").append(currentFetchedCount).append("개");
-        } else {
-            summary.append(" / 조회 확인 전");
         }
         if (currentTotalCount > 0) {
             summary.append(" / 출고 ").append(currentTotalCount).append("건");
-        } else {
-            summary.append(" / 출고 없음");
         }
         return summary.toString();
     }
 
-    private boolean areAlertsEnabled() {
-        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getBoolean(PREF_ALERTS_ENABLED, true);
-    }
-
-    private void setAlertsEnabled(boolean enabled) {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .edit()
-                .putBoolean(PREF_ALERTS_ENABLED, enabled)
-                .apply();
-        applyAlertSchedule(enabled);
-    }
-
-    private void launchCafe24Import(String slot) {
-        pendingCafe24Slot = slot;
-        cafe24ImportLauncher.launch(new String[]{"application/json", "text/plain"});
+    private void launchCafe24Import(String slot, String displayName) {
+        pendingCafe24Slot = safeText(slot);
+        pendingCafe24Name = safeText(displayName);
+        cafe24ImportLauncher.launch(new String[]{"application/json", "text/plain", "*/*"});
     }
 
     private void handleCafe24ImportResult(Uri uri) {
-        if (uri == null) {
+        if (uri == null || pendingCafe24Slot.isEmpty()) {
             return;
         }
 
         try {
+            try {
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+
             String json = readText(uri);
             validateCafe24Json(json);
-            credentialStore.saveCafe24Json(pendingCafe24Slot, json);
-            showToast(CredentialStore.SLOT_CAFE24_PREPARE.equals(pendingCafe24Slot)
-                    ? getString(R.string.import_prepare_success)
-                    : getString(R.string.import_home_success));
+            String sourceLabel = resolveDocumentLabel(uri);
+            String sourceUri = uri.toString();
+            credentialStore.saveCafe24Json(pendingCafe24Slot, json, sourceLabel, sourceUri);
+
+            String marketName = pendingCafe24Name;
+            if (marketName.isEmpty()) {
+                Cafe24MarketConfig config = credentialStore.getCafe24Market(pendingCafe24Slot);
+                marketName = config == null ? "판매처" : config.displayName;
+            }
+            showToast(marketName + " JSON을 저장했습니다.");
             refreshOrders();
         } catch (Exception ex) {
             showToast(getString(R.string.import_failed_prefix) + ex.getMessage());
@@ -773,8 +1051,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private EditText buildInput(int hintResId, String value) {
+        return buildTextInput(getString(hintResId), value);
+    }
+
+    private EditText buildTextInput(String hint, String value) {
         EditText editText = new EditText(this);
-        editText.setHint(hintResId);
+        editText.setHint(hint);
         editText.setText(value);
         editText.setInputType(InputType.TYPE_CLASS_TEXT);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
@@ -785,6 +1067,7 @@ public class MainActivity extends AppCompatActivity {
         editText.setLayoutParams(params);
         return editText;
     }
+
     private String readText(Uri uri) throws IOException {
         try (InputStream inputStream = getContentResolver().openInputStream(uri)) {
             if (inputStream == null) {
@@ -802,6 +1085,28 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private String resolveDocumentLabel(Uri uri) {
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst()) {
+                int columnIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (columnIndex >= 0) {
+                    String name = cursor.getString(columnIndex);
+                    if (name != null && !name.trim().isEmpty()) {
+                        return name.trim();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return uri.getLastPathSegment() == null ? uri.toString() : uri.getLastPathSegment();
+    }
+
     private void validateCafe24Json(String json) throws Exception {
         JSONObject object = new JSONObject(json);
         if (object.optString("MallId").isEmpty()) {
@@ -809,12 +1114,34 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void applyAlertSchedule(boolean enabled) {
+    private void applyPollingSchedule(boolean enabled) {
         if (enabled) {
-            ShipmentAlertWorker.schedule(this);
+            ShipmentAlertWorker.schedule(this, AlertPrefs.getPollingInterval(this));
         } else {
             ShipmentAlertWorker.cancel(this);
         }
+    }
+
+    private void applyScheduledAlarm(boolean enabled) {
+        if (enabled) {
+            com.rkghrud.shipapp.receivers.ScheduledAlarmReceiver.scheduleNext(this);
+        } else {
+            com.rkghrud.shipapp.receivers.ScheduledAlarmReceiver.cancel(this);
+        }
+    }
+
+    private void applyAlertSchedule(boolean enabled) {
+        applyPollingSchedule(enabled);
+    }
+
+    private boolean areAlertsEnabled() {
+        return AlertPrefs.isPollingEnabled(this);
+    }
+
+    private void setAlertsEnabled(boolean enabled) {
+        AlertPrefs.prefs(this).edit()
+                .putBoolean(AlertPrefs.KEY_POLLING_ENABLED, enabled).apply();
+        applyPollingSchedule(enabled);
     }
 
     private void requestNotificationPermissionIfNeeded() {
@@ -849,6 +1176,10 @@ public class MainActivity extends AppCompatActivity {
         return value == null ? "" : value.trim();
     }
 
+    private void showOrderDetail(DispatchOrder order) {
+        OrderDetailDialog.show(this, order);
+    }
+
     private void showToast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
@@ -860,8 +1191,8 @@ public class MainActivity extends AppCompatActivity {
     private static class DispatchLoadResult {
         final List<DispatchOrder> orders = new ArrayList<>();
         final List<String> errors = new ArrayList<>();
-        String homeStatus = "";
-        String prepareStatus = "";
+        final Map<String, String> cafe24Statuses = new LinkedHashMap<>();
+        final List<String> activeCafe24Keys = new ArrayList<>();
         String coupangStatus = "";
         String updatedAt = "-";
         int connectedCount;
@@ -869,6 +1200,4 @@ public class MainActivity extends AppCompatActivity {
         int totalCount;
     }
 }
-
-
 

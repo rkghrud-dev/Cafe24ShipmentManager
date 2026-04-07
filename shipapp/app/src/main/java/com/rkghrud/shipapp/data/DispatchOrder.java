@@ -6,6 +6,7 @@ import java.util.List;
 public class DispatchOrder {
     public final String marketLabel;
     public final String marketKey;
+    public final String marketName;
     public final String orderId;
     public final String orderItemCode;
     public final String shipmentBoxId;
@@ -38,6 +39,7 @@ public class DispatchOrder {
         this(
                 marketLabel,
                 marketKey,
+                deriveMarketName(marketLabel, marketKey),
                 orderId,
                 orderItemCode,
                 shipmentBoxId,
@@ -67,8 +69,43 @@ public class DispatchOrder {
             String recipientCellPhone,
             String recipientPhone
     ) {
+        this(
+                marketLabel,
+                marketKey,
+                deriveMarketName(marketLabel, marketKey),
+                orderId,
+                orderItemCode,
+                shipmentBoxId,
+                orderStatus,
+                recipientName,
+                productName,
+                quantity,
+                orderDate,
+                purchaseAmount,
+                recipientCellPhone,
+                recipientPhone
+        );
+    }
+
+    public DispatchOrder(
+            String marketLabel,
+            String marketKey,
+            String marketName,
+            String orderId,
+            String orderItemCode,
+            String shipmentBoxId,
+            String orderStatus,
+            String recipientName,
+            String productName,
+            int quantity,
+            String orderDate,
+            String purchaseAmount,
+            String recipientCellPhone,
+            String recipientPhone
+    ) {
         this.marketLabel = marketLabel;
         this.marketKey = marketKey;
+        this.marketName = safe(marketName);
         this.orderId = orderId;
         this.orderItemCode = orderItemCode;
         this.shipmentBoxId = shipmentBoxId;
@@ -92,10 +129,13 @@ public class DispatchOrder {
         if ("coupang".equals(marketKey)) {
             return "쿠팡";
         }
-        if (CredentialStore.SLOT_CAFE24_PREPARE.equals(marketKey)) {
-            return "준비몰";
+        if (!marketName.isEmpty()) {
+            return marketName;
         }
-        return "홈런";
+        if (marketLabel != null && marketLabel.contains("/")) {
+            return marketLabel.split("/")[0].trim();
+        }
+        return safe(marketLabel);
     }
 
     public String carrierLabel() {
@@ -123,5 +163,19 @@ public class DispatchOrder {
             return;
         }
         keys.add(trimmed);
+    }
+
+    private static String deriveMarketName(String marketLabel, String marketKey) {
+        if (marketLabel != null && marketLabel.contains("/")) {
+            return marketLabel.split("/")[0].trim();
+        }
+        if ("coupang".equals(marketKey)) {
+            return "쿠팡";
+        }
+        return safe(marketLabel);
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value.trim();
     }
 }

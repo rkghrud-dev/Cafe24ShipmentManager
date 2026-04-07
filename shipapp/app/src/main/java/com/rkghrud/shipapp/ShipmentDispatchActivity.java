@@ -17,10 +17,13 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.rkghrud.shipapp.data.Cafe24MarketConfig;
 import com.rkghrud.shipapp.data.CredentialStore;
 import com.rkghrud.shipapp.data.DispatchOrder;
+import com.rkghrud.shipapp.data.GoogleSheetsTrackingMatcher;
 import com.rkghrud.shipapp.data.LiveShipmentRepository;
 import com.rkghrud.shipapp.ui.DispatchOrderAdapter;
+import com.rkghrud.shipapp.ui.OrderDetailDialog;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -32,37 +35,29 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class ShipmentDispatchActivity extends AppCompatActivity {
-
-    // 마켓 목록 (표시명 → marketKey 매핑)
-    private static final String[] MARKET_LABELS = {
-            "Cafe24 · 홈런마켓",
-            "Cafe24 · 준비몰",
-            "쿠팡 · 홈런마켓"
-    };
-    private static final String[] MARKET_KEYS = {
-            CredentialStore.SLOT_CAFE24_HOME,
-            CredentialStore.SLOT_CAFE24_PREPARE,
-            "coupang"
-    };
-
-    // 기본 택배사 (Cafe24: 0006=CJ대한통운, Coupang: CJGLS)
-    private static final String CAFE24_SHIPPING_CODE  = "0006";
-    private static final String COUPANG_SHIPPING_CODE = "CJGLS";
-
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US);
-    private static final DateTimeFormatter DATE_DISPLAY = DateTimeFormatter.ofPattern("MM/dd", Locale.US);
 
-    private Spinner           spinnerMarket;
-    private MaterialButton    btnStartDate, btnEndDate, btnQuery;
-    private MaterialButton    btnSelectAll, btnDeselectAll, btnDispatch;
-    private ProgressBar       progressBar;
-    private TextView          tvStatusMsg;
-    private RecyclerView      rvOrders;
-    private View              layoutActions;
+    private Spinner spinnerMarket;
+    private MaterialButton btnStartDate;
+    private MaterialButton btnEndDate;
+    private MaterialButton btnQuery;
+    private MaterialButton btnSelectAll;
+    private MaterialButton btnDeselectAll;
+    private MaterialButton btnDispatch;
+    private ProgressBar progressBar;
+    private TextView tvStatusMsg;
+    private RecyclerView rvOrders;
+    private View layoutActions;
+    private View dividerActions;
 
     private DispatchOrderAdapter adapter;
     private LiveShipmentRepository repository;
+    private CredentialStore credentialStore;
     private ExecutorService executor;
+    private ArrayAdapter<String> marketAdapter;
+
+    private final List<String> marketLabels = new ArrayList<>();
+    private final List<String> marketKeys = new ArrayList<>();
 
     private LocalDate startDate;
     private LocalDate endDate;
@@ -73,69 +68,114 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
         setContentView(R.layout.activity_dispatch);
 
         repository = new LiveShipmentRepository(this);
-        executor   = Executors.newSingleThreadExecutor();
+        credentialStore = new CredentialStore(this);
+        executor = Executors.newSingleThreadExecutor();
 
-        // 기본 날짜: 오늘-14일 ~ 오늘
-        endDate   = LocalDate.now();
+        endDate = LocalDate.now();
         startDate = endDate.minusDays(14);
 
-        // View 바인딩
         MaterialToolbar toolbar = findViewById(R.id.toolbarDispatch);
-        spinnerMarket  = findViewById(R.id.spinnerMarket);
-        btnStartDate   = findViewById(R.id.btnStartDate);
-        btnEndDate     = findViewById(R.id.btnEndDate);
-        btnQuery       = findViewById(R.id.btnQuery);
-        btnSelectAll   = findViewById(R.id.btnSelectAll);
+        spinnerMarket = findViewById(R.id.spinnerMarket);
+        btnStartDate = findViewById(R.id.btnStartDate);
+        btnEndDate = findViewById(R.id.btnEndDate);
+        btnQuery = findViewById(R.id.btnQuery);
+        btnSelectAll = findViewById(R.id.btnSelectAll);
         btnDeselectAll = findViewById(R.id.btnDeselectAll);
-        btnDispatch    = findViewById(R.id.btnDispatch);
-        progressBar    = findViewById(R.id.progressBar);
-        tvStatusMsg    = findViewById(R.id.tvStatusMsg);
-        rvOrders       = findViewById(R.id.rvOrders);
-        layoutActions  = findViewById(R.id.layoutActions);
+        btnDispatch = findViewById(R.id.btnDispatch);
+        progressBar = findViewById(R.id.progressBar);
+        tvStatusMsg = findViewById(R.id.tvStatusMsg);
+        rvOrders = findViewById(R.id.rvOrders);
+        layoutActions = findViewById(R.id.layoutActions);
+        dividerActions = findViewById(R.id.dividerActions);
 
-        // 툴바 뒤로가기
         toolbar.setNavigationOnClickListener(v -> finish());
 
-        // 마켓 스피너
-        ArrayAdapter<String> spinnerAdapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, MARKET_LABELS);
-        spinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerMarket.setAdapter(spinnerAdapter);
+        marketAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, marketLabels);
+        marketAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerMarket.setAdapter(marketAdapter);
 
-        // 날짜 버튼 초기 텍스트
         updateDateButtons();
+        rebuildMarketOptions();
 
-        // RecyclerView
         adapter = new DispatchOrderAdapter();
         adapter.setOnSelectionChanged(this::updateDispatchButton);
+        adapter.setOnItemClick(this::showOrderDetail);
         rvOrders.setLayoutManager(new LinearLayoutManager(this));
         rvOrders.setAdapter(adapter);
 
-        // 버튼 클릭
         btnStartDate.setOnClickListener(v -> pickDate(true));
         btnEndDate.setOnClickListener(v -> pickDate(false));
         btnQuery.setOnClickListener(v -> queryOrders());
-        btnSelectAll.setOnClickListener(v -> { adapter.selectAll(true); updateDispatchButton(); });
-        btnDeselectAll.setOnClickListener(v -> { adapter.selectAll(false); updateDispatchButton(); });
+        btnSelectAll.setOnClickListener(v -> {
+            adapter.selectAll(true);
+            updateDispatchButton();
+        });
+        btnDeselectAll.setOnClickListener(v -> {
+            adapter.selectAll(false);
+            updateDispatchButton();
+        });
         btnDispatch.setOnClickListener(v -> confirmAndDispatch());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        rebuildMarketOptions();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (executor != null) executor.shutdownNow();
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+    }
+
+    private void rebuildMarketOptions() {
+        String selectedKey = getSelectedMarketKey();
+        marketLabels.clear();
+        marketKeys.clear();
+
+        for (Cafe24MarketConfig config : credentialStore.getActiveCafe24Markets()) {
+            marketLabels.add("Cafe24 · " + config.displayName);
+            marketKeys.add(config.key);
+        }
+        if (credentialStore.getCoupangCredentials().isComplete()) {
+            marketLabels.add("쿠팡 · 홈런마켓");
+            marketKeys.add("coupang");
+        }
+        if (marketLabels.isEmpty()) {
+            marketLabels.add("판매처 없음");
+            marketKeys.add("");
+        }
+
+        marketAdapter.notifyDataSetChanged();
+        int selectedIndex = marketKeys.indexOf(selectedKey);
+        spinnerMarket.setSelection(selectedIndex >= 0 ? selectedIndex : 0, false);
+
+        boolean hasMarket = hasQueryableMarket();
+        btnQuery.setEnabled(hasMarket && progressBar.getVisibility() != View.VISIBLE);
+        if (!hasMarket) {
+            tvStatusMsg.setText("설정에서 표시할 판매처를 먼저 추가하고 JSON을 연결하세요.");
+            tvStatusMsg.setVisibility(View.VISIBLE);
+            layoutActions.setVisibility(View.GONE);
+            dividerActions.setVisibility(View.GONE);
+        }
     }
 
     private void pickDate(boolean isStart) {
-        LocalDate cur = isStart ? startDate : endDate;
-        Calendar cal = Calendar.getInstance();
-        cal.set(cur.getYear(), cur.getMonthValue() - 1, cur.getDayOfMonth());
-        new DatePickerDialog(this, (view, y, m, d) -> {
-            LocalDate picked = LocalDate.of(y, m + 1, d);
-            if (isStart) startDate = picked;
-            else         endDate   = picked;
+        LocalDate current = isStart ? startDate : endDate;
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(current.getYear(), current.getMonthValue() - 1, current.getDayOfMonth());
+        new DatePickerDialog(this, (view, year, month, dayOfMonth) -> {
+            LocalDate picked = LocalDate.of(year, month + 1, dayOfMonth);
+            if (isStart) {
+                startDate = picked;
+            } else {
+                endDate = picked;
+            }
             updateDateButtons();
-        }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show();
+        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show();
     }
 
     private void updateDateButtons() {
@@ -144,29 +184,53 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
     }
 
     private void queryOrders() {
-        int idx = spinnerMarket.getSelectedItemPosition();
-        if (idx < 0 || idx >= MARKET_KEYS.length) return;
-        String marketKey = MARKET_KEYS[idx];
+        String marketKey = getSelectedMarketKey();
+        if (marketKey.isEmpty()) {
+            Toast.makeText(this, "조회 가능한 판매처가 없습니다.", Toast.LENGTH_SHORT).show();
+            return;
+        }
 
         setLoading(true);
         tvStatusMsg.setVisibility(View.GONE);
         layoutActions.setVisibility(View.GONE);
+        dividerActions.setVisibility(View.GONE);
 
-        LocalDate s = startDate, e = endDate;
+        LocalDate queryStartDate = startDate;
+        LocalDate queryEndDate = endDate;
+        String marketLabel = getSelectedMarketLabel();
         executor.execute(() -> {
             try {
-                List<DispatchOrder> orders = repository.fetchOrdersForDispatch(marketKey, s, e);
+                List<DispatchOrder> orders = repository.fetchOrdersForDispatch(marketKey, queryStartDate, queryEndDate);
+
+                String matchSummary = "";
+                if (!orders.isEmpty()) {
+                    try {
+                        GoogleSheetsTrackingMatcher.MatchResult match = GoogleSheetsTrackingMatcher.applyToOrders(orders);
+                        matchSummary = match.summary();
+                    } catch (Exception matchEx) {
+                        matchSummary = "구글시트 매칭 실패: " + matchEx.getMessage();
+                    }
+                }
+
+                String finalMatchSummary = matchSummary;
                 runOnUiThread(() -> {
                     setLoading(false);
                     if (orders.isEmpty()) {
-                        tvStatusMsg.setText("조회 결과가 없습니다.\n(" + MARKET_LABELS[idx] + " / " + DATE_FMT.format(s) + " ~ " + DATE_FMT.format(e) + ")");
+                        tvStatusMsg.setText("조회 결과가 없습니다.\n(" + marketLabel + " / " + DATE_FMT.format(queryStartDate) + " ~ " + DATE_FMT.format(queryEndDate) + ")");
                         tvStatusMsg.setVisibility(View.VISIBLE);
                         layoutActions.setVisibility(View.GONE);
+                        dividerActions.setVisibility(View.GONE);
                     } else {
-                        tvStatusMsg.setVisibility(View.GONE);
                         layoutActions.setVisibility(View.VISIBLE);
+                        dividerActions.setVisibility(View.VISIBLE);
                         adapter.setItems(orders);
                         updateDispatchButton();
+                        if (!finalMatchSummary.isEmpty()) {
+                            tvStatusMsg.setText(finalMatchSummary);
+                            tvStatusMsg.setVisibility(View.VISIBLE);
+                        } else {
+                            tvStatusMsg.setVisibility(View.GONE);
+                        }
                         Toast.makeText(this, orders.size() + "건 조회 완료", Toast.LENGTH_SHORT).show();
                     }
                 });
@@ -182,9 +246,9 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
 
     private void updateDispatchButton() {
         int selected = adapter.getSelectedCount();
-        int ready    = adapter.getReadyCount();
+        int ready = adapter.getReadyCount();
         btnDispatch.setText("선택 출고처리 (" + ready + "/" + selected + "건)");
-        btnDispatch.setEnabled(ready > 0);
+        btnDispatch.setEnabled(ready > 0 && progressBar.getVisibility() != View.VISIBLE);
     }
 
     private void confirmAndDispatch() {
@@ -197,27 +261,23 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
                 .setTitle("출고 처리 확인")
                 .setMessage(targets.size() + "건의 주문에 송장을 전송합니다.\n계속하시겠습니까?")
                 .setNegativeButton("취소", null)
-                .setPositiveButton("출고처리", (d, w) -> dispatchSelected(targets))
+                .setPositiveButton("출고처리", (dialog, which) -> dispatchSelected(targets))
                 .show();
     }
 
     private void dispatchSelected(List<DispatchOrder> targets) {
         setLoading(true);
-        int idx = spinnerMarket.getSelectedItemPosition();
-        boolean isCoupang = idx >= 0 && "coupang".equals(MARKET_KEYS[idx]);
-        String shippingCode = isCoupang ? COUPANG_SHIPPING_CODE : CAFE24_SHIPPING_CODE;
-
         executor.execute(() -> {
             List<String> success = new ArrayList<>();
-            List<String> failed  = new ArrayList<>();
+            List<String> failed = new ArrayList<>();
 
             for (DispatchOrder order : targets) {
-                String err = repository.pushTrackingNumber(order, shippingCode);
-                String label = order.recipientName + " / " + order.trackingNumber;
-                if (err == null || err.isEmpty()) {
+                String error = repository.pushTrackingNumber(order, order.shippingCode());
+                String label = order.shortMarketLabel() + " / " + order.recipientName + " / " + order.trackingNumber;
+                if (error == null || error.isEmpty()) {
                     success.add(label);
                 } else {
-                    failed.add(label + "\n  → " + err);
+                    failed.add(label + "\n  → " + error);
                 }
             }
 
@@ -229,25 +289,56 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
     }
 
     private void showResultDialog(List<String> success, List<String> failed) {
-        StringBuilder sb = new StringBuilder();
+        StringBuilder builder = new StringBuilder();
         if (!success.isEmpty()) {
-            sb.append("✔ 성공 ").append(success.size()).append("건\n");
-            for (String s : success) sb.append("  • ").append(s).append("\n");
+            builder.append("성공 ").append(success.size()).append("건\n");
+            for (String item : success) {
+                builder.append("• ").append(item).append("\n");
+            }
         }
         if (!failed.isEmpty()) {
-            sb.append("\n✖ 실패 ").append(failed.size()).append("건\n");
-            for (String f : failed) sb.append("  • ").append(f).append("\n");
+            if (builder.length() > 0) {
+                builder.append("\n");
+            }
+            builder.append("실패 ").append(failed.size()).append("건\n");
+            for (String item : failed) {
+                builder.append("• ").append(item).append("\n");
+            }
         }
         new MaterialAlertDialogBuilder(this)
                 .setTitle("출고처리 결과")
-                .setMessage(sb.toString().trim())
+                .setMessage(builder.toString().trim())
                 .setPositiveButton("확인", null)
                 .show();
     }
 
+    private void showOrderDetail(DispatchOrder order) {
+        OrderDetailDialog.show(this, order);
+    }
+
     private void setLoading(boolean loading) {
         progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
-        btnQuery.setEnabled(!loading);
+        btnQuery.setEnabled(!loading && hasQueryableMarket());
         btnDispatch.setEnabled(!loading && adapter.getReadyCount() > 0);
+    }
+
+    private boolean hasQueryableMarket() {
+        return !marketKeys.isEmpty() && !marketKeys.get(0).isEmpty();
+    }
+
+    private String getSelectedMarketKey() {
+        int position = spinnerMarket.getSelectedItemPosition();
+        if (position < 0 || position >= marketKeys.size()) {
+            return "";
+        }
+        return marketKeys.get(position);
+    }
+
+    private String getSelectedMarketLabel() {
+        int position = spinnerMarket.getSelectedItemPosition();
+        if (position < 0 || position >= marketLabels.size()) {
+            return "-";
+        }
+        return marketLabels.get(position);
     }
 }

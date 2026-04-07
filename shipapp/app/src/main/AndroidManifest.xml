@@ -3,12 +3,16 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.ShipApp">
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -23,6 +27,34 @@
             android:exported="false"
             android:label="출고/송장 처리"
             android:parentActivityName=".MainActivity" />
+
+        <!-- 재부팅 후 알람 복구 -->
+        <receiver
+            android:name=".receivers.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 지정 시간 알림 수신 -->
+        <receiver
+            android:name=".receivers.ScheduledAlarmReceiver"
+            android:exported="false" />
+
+        <!-- 홈 위젯 -->
+        <receiver
+            android:name=".widget.ShipmentWidget"
+            android:exported="true"
+            android:label="ShipApp 위젯">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/shipment_widget_info" />
+        </receiver>
+
     </application>
 
 </manifest>

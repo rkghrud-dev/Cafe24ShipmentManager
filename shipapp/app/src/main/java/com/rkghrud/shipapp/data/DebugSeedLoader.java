@@ -24,13 +24,13 @@ public final class DebugSeedLoader {
         int loaded = 0;
         String homeJson = readAsset(context, "seeds/cafe24_home.json");
         if (homeJson != null && !homeJson.isEmpty()) {
-            store.saveCafe24Json(CredentialStore.SLOT_CAFE24_HOME, homeJson);
+            store.saveCafe24Json(CredentialStore.SLOT_CAFE24_HOME, homeJson, "cafe24_home.json", "assets://seeds/cafe24_home.json");
             loaded++;
         }
 
         String prepareJson = readAsset(context, "seeds/cafe24_prepare.json");
         if (prepareJson != null && !prepareJson.isEmpty()) {
-            store.saveCafe24Json(CredentialStore.SLOT_CAFE24_PREPARE, prepareJson);
+            store.saveCafe24Json(CredentialStore.SLOT_CAFE24_PREPARE, prepareJson, "cafe24_prepare.json", "assets://seeds/cafe24_prepare.json");
             loaded++;
         }
 

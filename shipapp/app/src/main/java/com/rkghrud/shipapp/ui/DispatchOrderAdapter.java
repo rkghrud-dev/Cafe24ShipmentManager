@@ -22,57 +22,50 @@ import java.util.List;
 public class DispatchOrderAdapter extends RecyclerView.Adapter<DispatchOrderAdapter.ViewHolder> {
     private final List<DispatchOrder> items = new ArrayList<>();
     private Runnable onSelectionChanged;
+    private OnItemClickListener onItemClick;
+
+    public interface OnItemClickListener {
+        void onItemClick(DispatchOrder order);
+    }
 
     public void setItems(List<DispatchOrder> newItems) {
         items.clear();
         items.addAll(newItems);
         notifyDataSetChanged();
-        if (onSelectionChanged != null) {
-            onSelectionChanged.run();
-        }
+        if (onSelectionChanged != null) onSelectionChanged.run();
     }
 
     public void setOnSelectionChanged(Runnable runnable) {
         onSelectionChanged = runnable;
     }
 
+    public void setOnItemClick(OnItemClickListener listener) {
+        onItemClick = listener;
+    }
+
     public void selectAll(boolean selected) {
-        for (DispatchOrder order : items) {
-            order.selected = selected;
-        }
+        for (DispatchOrder order : items) order.selected = selected;
         notifyDataSetChanged();
-        if (onSelectionChanged != null) {
-            onSelectionChanged.run();
-        }
+        if (onSelectionChanged != null) onSelectionChanged.run();
     }
 
     public List<DispatchOrder> getSelectedItems() {
-        List<DispatchOrder> selectedItems = new ArrayList<>();
+        List<DispatchOrder> result = new ArrayList<>();
         for (DispatchOrder order : items) {
-            if (order.selected && hasTrackingNumber(order)) {
-                selectedItems.add(order);
-            }
+            if (order.selected && hasTracking(order)) result.add(order);
         }
-        return selectedItems;
+        return result;
     }
 
     public int getSelectedCount() {
         int count = 0;
-        for (DispatchOrder order : items) {
-            if (order.selected) {
-                count++;
-            }
-        }
+        for (DispatchOrder order : items) if (order.selected) count++;
         return count;
     }
 
     public int getReadyCount() {
         int count = 0;
-        for (DispatchOrder order : items) {
-            if (order.selected && hasTrackingNumber(order)) {
-                count++;
-            }
-        }
+        for (DispatchOrder order : items) if (order.selected && hasTracking(order)) count++;
         return count;
     }
 
@@ -86,7 +79,7 @@ public class DispatchOrderAdapter extends RecyclerView.Adapter<DispatchOrderAdap
 
     @Override
     public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
-        holder.bind(items.get(position), onSelectionChanged);
+        holder.bind(items.get(position), onSelectionChanged, onItemClick);
     }
 
     @Override
@@ -94,11 +87,12 @@ public class DispatchOrderAdapter extends RecyclerView.Adapter<DispatchOrderAdap
         return items.size();
     }
 
-    private boolean hasTrackingNumber(DispatchOrder order) {
+    private boolean hasTracking(DispatchOrder order) {
         return order.trackingNumber != null && !order.trackingNumber.trim().isEmpty();
     }
 
     static class ViewHolder extends RecyclerView.ViewHolder {
+        final View cardRoot;
         final CheckBox cbSelect;
         final TextView tvRecipient;
         final TextView tvAmount;
@@ -111,66 +105,57 @@ public class DispatchOrderAdapter extends RecyclerView.Adapter<DispatchOrderAdap
 
         ViewHolder(@NonNull View itemView) {
             super(itemView);
-            cbSelect = itemView.findViewById(R.id.cbSelect);
+            cardRoot    = itemView.findViewById(R.id.cardRoot);
+            cbSelect    = itemView.findViewById(R.id.cbSelect);
             tvRecipient = itemView.findViewById(R.id.tvRecipient);
-            tvAmount = itemView.findViewById(R.id.tvAmount);
-            tvProduct = itemView.findViewById(R.id.tvProduct);
-            tvQuantity = itemView.findViewById(R.id.tvQuantity);
-            tvMarket = itemView.findViewById(R.id.tvMarket);
-            tvCarrier = itemView.findViewById(R.id.tvCarrier);
-            etTracking = itemView.findViewById(R.id.etTracking);
+            tvAmount    = itemView.findViewById(R.id.tvAmount);
+            tvProduct   = itemView.findViewById(R.id.tvProduct);
+            tvQuantity  = itemView.findViewById(R.id.tvQuantity);
+            tvMarket    = itemView.findViewById(R.id.tvMarket);
+            tvCarrier   = itemView.findViewById(R.id.tvCarrier);
+            etTracking  = itemView.findViewById(R.id.etTracking);
         }
 
-        void bind(DispatchOrder order, Runnable onSelectionChanged) {
+        void bind(DispatchOrder order, Runnable onSelectionChanged, OnItemClickListener onItemClick) {
             cbSelect.setOnCheckedChangeListener(null);
             cbSelect.setChecked(order.selected);
-            cbSelect.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                order.selected = isChecked;
-                if (onSelectionChanged != null) {
-                    onSelectionChanged.run();
-                }
+            cbSelect.setOnCheckedChangeListener((btn, checked) -> {
+                order.selected = checked;
+                if (onSelectionChanged != null) onSelectionChanged.run();
             });
 
-            tvRecipient.setText(shorten(defaultText(order.recipientName, "이름 없음"), 6));
-            tvAmount.setText(defaultText(order.purchaseAmount, "-"));
-            tvProduct.setText(shorten(defaultText(order.productName, "상품명 없음"), 12));
-            tvQuantity.setText(order.quantity > 0 ? order.quantity + "개" : "-");
+            tvRecipient.setText(safe(order.recipientName, "이름 없음"));
+            tvProduct.setText(safe(order.productName, "상품명 없음"));
+            tvQuantity.setText(order.quantity > 0 ? order.quantity + "개" : "");
+
+            String amt = safe(order.purchaseAmount, "");
+            tvAmount.setText(amt);
+            tvAmount.setTextColor(ContextCompat.getColor(itemView.getContext(),
+                    amt.isEmpty() || "-".equals(amt)
+                            ? R.color.ship_text_secondary : R.color.ship_text_primary));
+
             tvMarket.setText(order.shortMarketLabel());
             tvCarrier.setText(order.carrierLabel());
-            tvAmount.setTextColor(ContextCompat.getColor(itemView.getContext(),
-                    "-".equals(order.purchaseAmount) ? R.color.ship_text_secondary : R.color.ship_text_primary));
 
-            if (trackingWatcher != null) {
-                etTracking.removeTextChangedListener(trackingWatcher);
-            }
+            if (trackingWatcher != null) etTracking.removeTextChangedListener(trackingWatcher);
             etTracking.setText(order.trackingNumber);
             trackingWatcher = new TextWatcher() {
-                @Override
-                public void beforeTextChanged(CharSequence s, int start, int count, int after) {
-                }
-
-                @Override
-                public void onTextChanged(CharSequence s, int start, int before, int count) {
-                }
-
+                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
                 @Override
                 public void afterTextChanged(Editable s) {
                     order.trackingNumber = s.toString().trim();
-                    if (onSelectionChanged != null) {
-                        onSelectionChanged.run();
-                    }
+                    if (onSelectionChanged != null) onSelectionChanged.run();
                 }
             };
             etTracking.addTextChangedListener(trackingWatcher);
+
+            // 카드 탭 → 주문 상세 (체크박스·EditText는 자체 이벤트 소비)
+            cardRoot.setOnClickListener(onItemClick != null ? v -> onItemClick.onItemClick(order) : null);
         }
 
-        private String defaultText(String value, String fallback) {
-            return value == null || value.trim().isEmpty() ? fallback : value.trim();
-        }
-
-        private String shorten(String value, int limit) {
-            return value.length() <= limit ? value : value.substring(0, limit) + "…";
+        private String safe(String value, String fallback) {
+            return (value == null || value.trim().isEmpty()) ? fallback : value.trim();
         }
     }
 }
-

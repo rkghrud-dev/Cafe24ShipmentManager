@@ -72,10 +72,12 @@ public final class GoogleSheetsTrackingMatcher {
     }
 
     private static ParsedSheet readConfiguredSheet() throws Exception {
+        ensureConfigured();
         String accessToken = refreshAccessToken();
-        String encodedRange = urlEncode("'" + SHEET_NAME + "'");
-        String url = SHEETS_BASE_URL + SPREADSHEET_ID + "/values/" + encodedRange
-                + "?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE";
+        String url = SHEETS_BASE_URL + SPREADSHEET_ID + "/values:batchGet"
+                + "?ranges=" + urlEncode(SHEET_NAME)
+                + "&majorDimension=ROWS"
+                + "&valueRenderOption=FORMATTED_VALUE";
 
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Authorization", "Bearer " + accessToken);
@@ -86,23 +88,7 @@ public final class GoogleSheetsTrackingMatcher {
             throw new IllegalArgumentException("구글시트 조회 실패 " + response.statusCode + ": " + clip(response.body));
         }
 
-        JSONObject root = new JSONObject(response.body);
-        JSONArray values = root.optJSONArray("values");
-        if (values == null || values.length() < 2) {
-            throw new IllegalArgumentException("출고정보 시트에 읽을 데이터가 없습니다.");
-        }
-
-        List<List<String>> rows = new ArrayList<>();
-        for (int i = 0; i < values.length(); i++) {
-            JSONArray rowArray = values.optJSONArray(i);
-            List<String> row = new ArrayList<>();
-            if (rowArray != null) {
-                for (int j = 0; j < rowArray.length(); j++) {
-                    row.add(cleanValue(rowArray.optString(j, "")));
-                }
-            }
-            rows.add(row);
-        }
+        List<List<String>> rows = parseRowsFromSheetsResponse(response.body);
 
         int headerRowIndex = detectHeaderRow(rows);
         List<String> headersRow = rows.get(headerRowIndex);
@@ -135,17 +121,12 @@ public final class GoogleSheetsTrackingMatcher {
         return new ParsedSheet(rows.size(), trackingRowCount, parsedRows);
     }
 
-    private static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
+    static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
         Map<String, List<SheetRow>> phoneIndex = new HashMap<>();
-        Map<String, List<SheetRow>> nameIndex = new HashMap<>();
 
         for (SheetRow row : parsedSheet.rows) {
             if (!row.recipientPhone.isEmpty()) {
                 phoneIndex.computeIfAbsent(row.recipientPhone, key -> new ArrayList<>()).add(row);
-            }
-            if (canUseNameFallback(row.recipientName)) {
-                String normalizedName = row.recipientName.trim().toLowerCase(Locale.ROOT);
-                nameIndex.computeIfAbsent(normalizedName, key -> new ArrayList<>()).add(row);
             }
         }
 
@@ -159,15 +140,6 @@ public final class GoogleSheetsTrackingMatcher {
             List<SheetRow> candidates = new ArrayList<>();
             addCandidates(candidates, phoneIndex, order.recipientCellPhone);
             addCandidates(candidates, phoneIndex, order.recipientPhone);
-
-            boolean usedNameFallback = false;
-            if (candidates.isEmpty() && canUseNameFallback(order.recipientName)) {
-                List<SheetRow> nameMatches = nameIndex.get(order.recipientName.trim().toLowerCase(Locale.ROOT));
-                if (nameMatches != null && !nameMatches.isEmpty()) {
-                    candidates.addAll(nameMatches);
-                    usedNameFallback = true;
-                }
-            }
             candidates = dedupeCandidates(candidates);
             if (candidates.isEmpty()) {
                 unmatchedCount++;
@@ -186,31 +158,25 @@ public final class GoogleSheetsTrackingMatcher {
                 continue;
             }
 
-            SheetRow matched = null;
-            if (withTracking.size() == 1) {
-                matched = withTracking.get(0);
-            } else {
-                List<SheetRow> nameMatches = findNameMatches(order.recipientName, withTracking);
-                if (nameMatches.size() == 1) {
-                    matched = nameMatches.get(0);
-                } else {
-                    candidateCount++;
-                }
-            }
-
-            if (matched == null) {
+            List<SheetRow> marketMatches = findMarketMatches(order.marketName, withTracking);
+            if (marketMatches.isEmpty()) {
+                unmatchedCount++;
                 continue;
             }
 
+            List<SheetRow> nameMatches = findNameMatches(order.recipientName, marketMatches);
+            if (nameMatches.size() != 1) {
+                candidateCount++;
+                continue;
+            }
+
+            SheetRow matched = nameMatches.get(0);
             order.trackingNumber = matched.trackingNumber;
             if (!matched.shippingCompany.isEmpty()) {
                 order.shippingCompanyName = matched.shippingCompany;
             }
             order.selected = true;
             matchedCount++;
-            if (usedNameFallback) {
-                nameFallbackCount++;
-            }
         }
 
         return new MatchResult(
@@ -261,6 +227,29 @@ public final class GoogleSheetsTrackingMatcher {
                 continue;
             }
             if (normalizedOrderName.contains(candidate.recipientName) || candidate.recipientName.contains(normalizedOrderName)) {
+                matches.add(candidate);
+            }
+        }
+        return matches;
+    }
+
+    private static List<SheetRow> findMarketMatches(String marketName, List<SheetRow> candidates) {
+        if (marketName == null || marketName.trim().isEmpty()) {
+            return candidates;
+        }
+
+        String normalizedOrderMarket = normalizeMarketName(marketName);
+        if (normalizedOrderMarket.isEmpty()) {
+            return candidates;
+        }
+
+        List<SheetRow> matches = new ArrayList<>();
+        for (SheetRow candidate : candidates) {
+            String normalizedVendor = normalizeMarketName(candidate.vendorName);
+            if (normalizedVendor.isEmpty()) {
+                continue;
+            }
+            if (normalizedVendor.contains(normalizedOrderMarket) || normalizedOrderMarket.contains(normalizedVendor)) {
                 matches.add(candidate);
             }
         }
@@ -434,6 +423,36 @@ public final class GoogleSheetsTrackingMatcher {
         return URLEncoder.encode(value, "UTF-8").replace("+", "%20");
     }
 
+    static List<List<String>> parseRowsFromSheetsResponse(String responseBody) throws Exception {
+        JSONObject root = new JSONObject(responseBody);
+        JSONArray values = root.optJSONArray("values");
+        if (values == null) {
+            JSONArray valueRanges = root.optJSONArray("valueRanges");
+            if (valueRanges != null && valueRanges.length() > 0) {
+                JSONObject firstRange = valueRanges.optJSONObject(0);
+                if (firstRange != null) {
+                    values = firstRange.optJSONArray("values");
+                }
+            }
+        }
+        if (values == null || values.length() < 2) {
+            throw new IllegalArgumentException("출고정보 시트에 읽을 데이터가 없습니다.");
+        }
+
+        List<List<String>> rows = new ArrayList<>();
+        for (int i = 0; i < values.length(); i++) {
+            JSONArray rowArray = values.optJSONArray(i);
+            List<String> row = new ArrayList<>();
+            if (rowArray != null) {
+                for (int j = 0; j < rowArray.length(); j++) {
+                    row.add(cleanValue(rowArray.optString(j, "")));
+                }
+            }
+            rows.add(row);
+        }
+        return rows;
+    }
+
     private static String joinRow(List<String> row) {
         if (row == null || row.isEmpty()) {
             return "";
@@ -467,6 +486,19 @@ public final class GoogleSheetsTrackingMatcher {
                 .replace(".", "");
     }
 
+    private static String normalizeMarketName(String value) {
+        return cleanValue(value)
+                .toLowerCase(Locale.ROOT)
+                .replace(" ", "")
+                .replace("_", "")
+                .replace("-", "")
+                .replace("/", "")
+                .replace("(", "")
+                .replace(")", "")
+                .replace(".", "")
+                .replace("cafe24", "");
+    }
+
     private static String normalizeTracking(String value) {
         return cleanValue(value).replaceAll("[^A-Za-z0-9]", "");
     }
@@ -482,7 +514,7 @@ public final class GoogleSheetsTrackingMatcher {
         return body.length() > 180 ? body.substring(0, 180) : body;
     }
 
-    private static final class ParsedSheet {
+    static final class ParsedSheet {
         final int sheetRowCount;
         final int trackingRowCount;
         final List<SheetRow> rows;
@@ -494,7 +526,7 @@ public final class GoogleSheetsTrackingMatcher {
         }
     }
 
-    private static final class SheetRow {
+    static final class SheetRow {
         final int rowIndex;
         final String sourceRowKey;
         final String vendorName;
@@ -575,5 +607,3 @@ public final class GoogleSheetsTrackingMatcher {
         }
     }
 }
-
-
