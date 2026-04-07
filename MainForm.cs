@@ -572,7 +572,9 @@ public partial class MainForm : Form
         try
         {
             btnFetch.Enabled = false;
-            btnFetch.Text = "주문 조회 중...";
+            btnFetch.Text = "📥 조회";
+            lblStatus.Text = "🔄 주문 조회 중...";
+            lblStatus.ForeColor = Color.Gray;
 
             var mergedOrders = new List<Cafe24Order>();
             var marketSummaries = new List<string>();
@@ -587,7 +589,7 @@ public partial class MainForm : Form
             {
                 var marketName = ResolveMarketDisplayName(client);
                 var sourceLabel = ResolveSourceFilterLabel(client);
-                btnFetch.Text = $"{sourceLabel} 조회 중...";
+                lblStatus.Text = $"🔄 {sourceLabel} 조회 중...";
 
                 try
                 {
@@ -1137,7 +1139,6 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
-
 
 
 

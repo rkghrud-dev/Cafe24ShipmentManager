@@ -429,22 +429,30 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             return false;
         }
 
+        var redirectUri = ResolveOAuthRedirectUri();
         var state = Guid.NewGuid().ToString("N")[..8];
         var authUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/authorize" +
             $"?response_type=code&client_id={_config.ClientId}" +
-            $"&redirect_uri={Uri.EscapeDataString(LocalCallbackUri)}" +
+            $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
             $"&scope={SharedOAuthScope}&state={state}";
+
+        _log.Info($"OAuth 재인증 RedirectUri: {redirectUri}");
+
+        var useLocalhostCapture = CanCaptureOAuthCodeViaLocalhost(redirectUri);
 
         // 1순위: localhost 내장 서버로 자동 수신
         string? code = null;
         bool browserOpened = false;
-        try
+        if (useLocalhostCapture)
         {
-            (code, browserOpened) = await TryCaptureOAuthCodeViaLocalhost(authUrl, state);
-        }
-        catch (Exception ex)
-        {
-            _log.Warn($"localhost 콜백 자동수신 실패: {ex.Message}");
+            try
+            {
+                (code, browserOpened) = await TryCaptureOAuthCodeViaLocalhost(authUrl, state);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn($"localhost 콜백 자동수신 실패: {ex.Message}");
+            }
         }
 
         // 2순위: 수동 붙여넣기 fallback
@@ -452,6 +460,10 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         {
             if (!browserOpened)
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
+
+            if (!useLocalhostCapture)
+                _log.Info("현재 RedirectUri는 외부 주소이므로 브라우저 주소창 URL 전체를 바로 붙여넣어 주세요.");
+
             code = PromptForAuthorizationCode();
         }
 
@@ -551,6 +563,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     {
         try
         {
+            var redirectUri = ResolveOAuthRedirectUri();
             var tokenUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/token";
             var authBytes = Encoding.ASCII.GetBytes($"{_config.ClientId}:{_config.ClientSecret}");
             var authHeader = Convert.ToBase64String(authBytes);
@@ -563,7 +576,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                 {
                     { "grant_type", "authorization_code" },
                     { "code", code },
-                    { "redirect_uri", LocalCallbackUri }
+                    { "redirect_uri", redirectUri }
                 })
             };
 
@@ -590,7 +603,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             _config.AccessToken = newAccessToken;
             if (!string.IsNullOrEmpty(newRefreshToken))
                 _config.RefreshToken = newRefreshToken;
-            _config.RedirectUri = LocalCallbackUri; // 저장된 URI도 localhost로 갱신
+            _config.RedirectUri = redirectUri;
 
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", newAccessToken);
             _log.Info("OAuth 재인증 성공 — 새 토큰 발급 완료");
@@ -649,6 +662,24 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             catch { }
         }
         return input; // 코드 직접 입력
+    }
+
+    private static bool CanCaptureOAuthCodeViaLocalhost(string redirectUri)
+    {
+        if (!Uri.TryCreate(redirectUri, UriKind.Absolute, out var uri))
+            return false;
+
+        return string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+               (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) || uri.Host == "127.0.0.1") &&
+               uri.Port == 19521 &&
+               string.Equals(uri.AbsolutePath.TrimEnd('/'), "/oauth/callback", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string ResolveOAuthRedirectUri()
+    {
+        return string.IsNullOrWhiteSpace(_config.RedirectUri)
+            ? LocalCallbackUri
+            : _config.RedirectUri.Trim();
     }
 
     private string ResolveMarketDisplayName()
@@ -724,5 +755,4 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
     }
 }
-
 
