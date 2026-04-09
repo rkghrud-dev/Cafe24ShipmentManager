@@ -24,6 +24,7 @@ public partial class MainForm
     private ToolStripMenuItem? _itemOrderExportCopyEx;
     private ToolStripMenuItem? _itemOrderExportSaveEx;
     private bool _orderExportUiInitializedEx;
+    private readonly Dictionary<string, string> _orderProgressStateByKeyEx = new(StringComparer.OrdinalIgnoreCase);
 
     private void EnsureOrderExportUi()
     {
@@ -228,11 +229,114 @@ public partial class MainForm
     {
         if (!dgvData.Columns.Contains(OrderProgressColumnNameEx)) return;
 
+        var changed = false;
         foreach (DataGridViewRow row in dgvData.Rows)
         {
             if (row.IsNewRow) continue;
             if (!IsPreviewOrderCheckedEx(row)) continue;
-            row.Cells[OrderProgressColumnNameEx].Value = "복사완료";
+            if (row.Tag is not Cafe24Order order) continue;
+
+            SetPersistedOrderProgressCodeEx(order, "copied", saveState: false);
+            ApplyPreviewOrderProgressEx(row, order);
+            changed = true;
+        }
+
+        if (changed)
+            SaveEnhancedState();
+    }
+
+    private static string BuildOrderStateKeyEx(Cafe24Order order)
+    {
+        return string.Join("|", new[]
+        {
+            order.MallId?.Trim() ?? "",
+            order.OrderId?.Trim() ?? "",
+            order.OrderItemCode?.Trim() ?? ""
+        });
+    }
+
+    private string GetPersistedOrderProgressCodeEx(Cafe24Order order)
+    {
+        var key = BuildOrderStateKeyEx(order);
+        return _orderProgressStateByKeyEx.TryGetValue(key, out var code)
+            ? NormalizeOrderProgressCodeEx(code)
+            : "";
+    }
+
+    private void SetPersistedOrderProgressCodeEx(Cafe24Order order, string code, bool saveState = true)
+    {
+        var normalized = NormalizeOrderProgressCodeEx(code);
+        var key = BuildOrderStateKeyEx(order);
+        if (string.IsNullOrWhiteSpace(key))
+            return;
+
+        if (string.IsNullOrWhiteSpace(normalized))
+            _orderProgressStateByKeyEx.Remove(key);
+        else
+            _orderProgressStateByKeyEx[key] = normalized;
+
+        if (saveState)
+            SaveEnhancedState();
+    }
+
+    private static string NormalizeOrderProgressCodeEx(string? code)
+    {
+        return code?.Trim() switch
+        {
+            "copied" => "copied",
+            "delivery_waiting" => "delivery_waiting",
+            "pushed" => "pushed",
+            _ => ""
+        };
+    }
+
+    private string ResolveOrderProgressLabelEx(Cafe24Order order)
+    {
+        if (order.PendingShipment)
+            return string.IsNullOrWhiteSpace(order.PendingShipmentDateLabel)
+                ? "미출고 확인"
+                : $"미출고 {order.PendingShipmentDateLabel}";
+
+        return GetPersistedOrderProgressCodeEx(order) switch
+        {
+            "copied" => "복사완료",
+            "delivery_waiting" => "배송대기중",
+            "pushed" => "반영완료",
+            _ => "조회완료"
+        };
+    }
+
+    private Color ResolvePreviewOrderRowBackColorEx(Cafe24Order order)
+    {
+        if (order.PendingShipment)
+            return UiPalette.PendingSurface;
+
+        return GetPersistedOrderProgressCodeEx(order) switch
+        {
+            "copied" => UiPalette.CopiedSurface,
+            "delivery_waiting" => UiPalette.WaitingSurface,
+            "pushed" => UiPalette.SuccessSurface,
+            _ => Color.White
+        };
+    }
+
+    private void ApplyPreviewOrderProgressEx(DataGridViewRow row, Cafe24Order order)
+    {
+        row.Cells[OrderProgressColumnNameEx].Value = ResolveOrderProgressLabelEx(order);
+        row.DefaultCellStyle.BackColor = ResolvePreviewOrderRowBackColorEx(order);
+        row.DefaultCellStyle.ForeColor = UiPalette.Text;
+    }
+
+    private void RefreshDataPreviewProgressStatesEx()
+    {
+        if (dgvData == null || !dgvData.Columns.Contains(OrderProgressColumnNameEx))
+            return;
+
+        foreach (DataGridViewRow row in dgvData.Rows)
+        {
+            if (row.IsNewRow) continue;
+            if (row.Tag is Cafe24Order order)
+                ApplyPreviewOrderProgressEx(row, order);
         }
     }
 
@@ -767,6 +871,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
             .Trim();
     }
 }
+
+
 
 
 

@@ -1044,6 +1044,14 @@ public partial class MainForm
                 _visibleStockColumnsEx.Add("CY");
             _loadedYuanRateEx = st.YuanRate ?? "320";
 
+            _orderProgressStateByKeyEx.Clear();
+            foreach (var entry in st.OrderProgressByKey ?? new Dictionary<string, string>())
+            {
+                var normalized = NormalizeOrderProgressCodeEx(entry.Value);
+                if (!string.IsNullOrWhiteSpace(entry.Key) && !string.IsNullOrWhiteSpace(normalized))
+                    _orderProgressStateByKeyEx[entry.Key] = normalized;
+            }
+
             if (DateTime.TryParse(st.StockAlertMutedDate, out var dt)) _stockAlertMutedDateEx = dt.Date;
         }
         catch { }
@@ -1060,7 +1068,10 @@ public partial class MainForm
                 VisibleStockColumns = _visibleStockColumnsEx.ToList(),
                 StockAlertMutedDate = _stockAlertMutedDateEx == DateTime.MinValue ? "" : _stockAlertMutedDateEx.ToString("yyyy-MM-dd"),
                 YuanRate = _txtStockYuanRate?.Text ?? _loadedYuanRateEx,
-                ImportCostYuanColumnInitialized = true
+                ImportCostYuanColumnInitialized = true,
+                OrderProgressByKey = _orderProgressStateByKeyEx
+                    .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase)
             };
             File.WriteAllText(GetEnhancedStatePath(), JsonConvert.SerializeObject(st, Formatting.Indented));
         }
@@ -1121,6 +1132,7 @@ public partial class MainForm
         public string? StockAlertMutedDate { get; set; }
         public string? YuanRate { get; set; }
         public bool? ImportCostYuanColumnInitialized { get; set; }
+        public Dictionary<string, string>? OrderProgressByKey { get; set; }
     }
 }
 
@@ -2013,4 +2025,7 @@ internal class DoubleBufferedPanel : Panel
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
     }
 }
+
+
+
 

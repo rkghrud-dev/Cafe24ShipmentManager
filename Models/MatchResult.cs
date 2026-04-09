@@ -21,4 +21,6 @@ public class MatchResult
     public string OrderPhone { get; set; } = "";
     public string OrderName { get; set; } = "";
     public string OrderProduct { get; set; } = "";
+    public bool PendingShipment { get; set; }
+    public string PendingShipmentMessage { get; set; } = "";
 }

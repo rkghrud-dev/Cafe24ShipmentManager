@@ -15,4 +15,8 @@ public class ShipmentSourceRow
     public string ProcessStatus { get; set; } = "pending"; // pending/matched/pushed/failed
     public string ImportedAt { get; set; } = "";
     public string? MatchedOrderId { get; set; }
+    public int SheetRowIndex { get; set; } = -1;
+    public bool PendingShipment { get; set; }
+    public string PendingShipmentDateLabel { get; set; } = "";
 }
+

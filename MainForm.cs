@@ -24,6 +24,8 @@ public partial class MainForm : Form
     private readonly UserSettingsService _userSettingsService;
     private const string StockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
     private const int StockDefaultSheetGid = 2073400281;
+    private const string PendingShipmentSheetName = "미출고 정보";
+    private string _pendingShipmentWindowLabel = "";
 
     // ── State ──
     private ExcelReadResult? _excelResult;
@@ -63,6 +65,7 @@ public partial class MainForm : Form
     private DataGridView dgvResult = null!;
     private Button btnMatch = null!;
     private Button btnPush = null!;
+    private Button btnDeliveryWaiting = null!;
     private Button btnExportFailed = null!;
 
     // ── Log ──
@@ -92,6 +95,7 @@ public partial class MainForm : Form
         InitializeUI();
         WireEvents();
         InitEnhancedState();
+        ApplyTheme();
 
         _log.OnLog += msg =>
         {
@@ -172,6 +176,288 @@ public partial class MainForm : Form
         return DateTime.MinValue;
     }
 
+    private static Color Blend(Color baseColor, Color overlayColor, double overlayRatio)
+    {
+        overlayRatio = Math.Max(0, Math.Min(1, overlayRatio));
+        var baseRatio = 1d - overlayRatio;
+        return Color.FromArgb(
+            (int)Math.Round(baseColor.R * baseRatio + overlayColor.R * overlayRatio),
+            (int)Math.Round(baseColor.G * baseRatio + overlayColor.G * overlayRatio),
+            (int)Math.Round(baseColor.B * baseRatio + overlayColor.B * overlayRatio));
+    }
+
+    private static class UiPalette
+    {
+        public static readonly Color Background = ColorTranslator.FromHtml("#F1FFFA");
+        public static readonly Color Surface = ColorTranslator.FromHtml("#CCFCCB");
+        public static readonly Color Accent = ColorTranslator.FromHtml("#96E6B3");
+        public static readonly Color Primary = ColorTranslator.FromHtml("#568259");
+        public static readonly Color Text = ColorTranslator.FromHtml("#464E47");
+        public static readonly Color PendingSurface = Blend(Primary, Color.White, 0.78d);
+        public static readonly Color CopiedSurface = Blend(Surface, Color.White, 0.35d);
+        public static readonly Color WaitingSurface = Blend(Accent, Color.White, 0.22d);
+        public static readonly Color SuccessSurface = Blend(Accent, Color.White, 0.40d);
+        public static readonly Color CandidateSurface = Blend(Accent, Color.White, 0.58d);
+        public static readonly Color WarningSurface = Blend(Surface, Color.White, 0.15d);
+        public static readonly Color DangerSurface = Blend(Text, Color.White, 0.82d);
+    }
+
+    private void ApplyTheme()
+    {
+        BackColor = UiPalette.Background;
+        ForeColor = UiPalette.Text;
+        ApplyThemeToControlTree(this);
+
+        if (txtLog != null)
+        {
+            txtLog.BackColor = UiPalette.Text;
+            txtLog.ForeColor = UiPalette.Background;
+        }
+    }
+
+    private void ApplyThemeToControlTree(Control parent)
+    {
+        foreach (Control control in parent.Controls)
+        {
+            switch (control)
+            {
+                case Button button:
+                    ApplyButtonTheme(button);
+                    break;
+                case DataGridView grid:
+                    ApplyGridTheme(grid);
+                    break;
+                case Label label when !ReferenceEquals(label, lblStatus):
+                    label.ForeColor = UiPalette.Text;
+                    break;
+                case TabPage tabPage:
+                    tabPage.BackColor = UiPalette.Background;
+                    break;
+                case CheckedListBox checkedListBox:
+                    checkedListBox.BackColor = Color.White;
+                    checkedListBox.ForeColor = UiPalette.Text;
+                    break;
+                case ComboBox comboBox:
+                    comboBox.BackColor = Color.White;
+                    comboBox.ForeColor = UiPalette.Text;
+                    break;
+                case TextBox textBox when !ReferenceEquals(textBox, txtLog):
+                    textBox.BackColor = Color.White;
+                    textBox.ForeColor = UiPalette.Text;
+                    break;
+            }
+
+            ApplyThemeToControlTree(control);
+        }
+    }
+
+    private void ApplyButtonTheme(Button button)
+    {
+        button.FlatStyle = FlatStyle.Flat;
+        button.FlatAppearance.BorderColor = UiPalette.Primary;
+        button.BackColor = UiPalette.Accent;
+        button.ForeColor = UiPalette.Text;
+    }
+
+    private void ApplyGridTheme(DataGridView grid)
+    {
+        grid.EnableHeadersVisualStyles = false;
+        grid.BackgroundColor = UiPalette.Background;
+        grid.GridColor = UiPalette.Accent;
+        grid.DefaultCellStyle.BackColor = Color.White;
+        grid.DefaultCellStyle.ForeColor = UiPalette.Text;
+        grid.DefaultCellStyle.SelectionBackColor = UiPalette.Primary;
+        grid.DefaultCellStyle.SelectionForeColor = Color.White;
+        grid.ColumnHeadersDefaultCellStyle.BackColor = UiPalette.Surface;
+        grid.ColumnHeadersDefaultCellStyle.ForeColor = UiPalette.Text;
+        grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = UiPalette.Primary;
+        grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = Color.White;
+    }
+
+    private static string ResolveSourceDisplayLabel(Cafe24Order order)
+    {
+        var marketName = ResolveMarketDisplayName(order);
+        var sourceType = ResolveSourceTypeLabel(order);
+        return string.IsNullOrWhiteSpace(marketName) ? sourceType : $"{marketName} / {sourceType}";
+    }
+
+    private async Task<int> ApplyPendingShipmentFlagsAsync(List<Cafe24Order> orders)
+    {
+        _pendingShipmentWindowLabel = "";
+        foreach (var order in orders)
+        {
+            order.PendingShipment = false;
+            order.PendingShipmentMessage = "";
+            order.PendingShipmentDateLabel = "";
+        }
+
+        if (_sheetsReader == null || orders.Count == 0)
+            return 0;
+
+        PendingShipmentSheetReadResult pendingResult;
+        try
+        {
+            pendingResult = await Task.Run(() => _sheetsReader.ReadPendingShipmentSheet(_spreadsheetId, PendingShipmentSheetName));
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"미출고 시트 로드 실패: {ex.Message}");
+            return 0;
+        }
+
+        _pendingShipmentWindowLabel = pendingResult.WindowLabel;
+        if (pendingResult.Rows.Count == 0)
+            return 0;
+
+        var phoneIndex = new Dictionary<string, List<ShipmentSourceRow>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in pendingResult.Rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.RecipientPhone))
+                continue;
+
+            if (!phoneIndex.TryGetValue(row.RecipientPhone, out var bucket))
+            {
+                bucket = new List<ShipmentSourceRow>();
+                phoneIndex[row.RecipientPhone] = bucket;
+            }
+
+            bucket.Add(row);
+        }
+
+        var pendingCount = 0;
+        foreach (var order in orders)
+        {
+            if (TryApplyPendingShipmentFlag(order, phoneIndex, pendingResult.LatestDateLabel))
+                pendingCount++;
+        }
+
+        if (pendingCount > 0)
+        {
+            var label = string.IsNullOrWhiteSpace(_pendingShipmentWindowLabel) ? "" : $" ({_pendingShipmentWindowLabel})";
+            _log.Info($"미출고 확인 {pendingCount}건 적용{label}");
+        }
+
+        return pendingCount;
+    }
+
+    private static bool TryApplyPendingShipmentFlag(
+        Cafe24Order order,
+        IReadOnlyDictionary<string, List<ShipmentSourceRow>> phoneIndex,
+        string latestDateLabel)
+    {
+        var candidates = new List<ShipmentSourceRow>();
+        AddPendingShipmentCandidates(candidates, phoneIndex, order.RecipientCellPhone);
+        AddPendingShipmentCandidates(candidates, phoneIndex, order.RecipientPhone);
+
+        candidates = candidates
+            .DistinctBy(candidate => candidate.SourceRowKey)
+            .OrderBy(candidate => candidate.SheetRowIndex)
+            .ToList();
+        if (candidates.Count == 0)
+            return false;
+
+        var withTracking = candidates
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.TrackingNumber))
+            .ToList();
+        if (withTracking.Count == 0)
+            return false;
+
+        var marketMatches = FindPendingShipmentMarketMatches(order.MarketName, withTracking);
+        if (marketMatches.Count == 0)
+            return false;
+
+        var nameMatches = FindPendingShipmentNameMatches(order.RecipientName, marketMatches);
+        if (nameMatches.Count != 1)
+            return false;
+
+        var matched = nameMatches[0];
+        order.PendingShipment = true;
+        order.PendingShipmentDateLabel = string.IsNullOrWhiteSpace(matched.PendingShipmentDateLabel)
+            ? latestDateLabel
+            : matched.PendingShipmentDateLabel;
+        order.PendingShipmentMessage = string.IsNullOrWhiteSpace(order.PendingShipmentDateLabel)
+            ? "미출고 확인 필요"
+            : $"미출고 확인 필요 ({order.PendingShipmentDateLabel})";
+        return true;
+    }
+
+    private static void AddPendingShipmentCandidates(
+        ICollection<ShipmentSourceRow> target,
+        IReadOnlyDictionary<string, List<ShipmentSourceRow>> phoneIndex,
+        string? phone)
+    {
+        var normalizedPhone = PhoneNormalizer.Normalize(phone ?? "");
+        if (string.IsNullOrWhiteSpace(normalizedPhone))
+            return;
+
+        if (phoneIndex.TryGetValue(normalizedPhone, out var rows))
+        {
+            foreach (var row in rows)
+                target.Add(row);
+        }
+    }
+
+    private static List<ShipmentSourceRow> FindPendingShipmentMarketMatches(string marketName, IEnumerable<ShipmentSourceRow> candidates)
+    {
+        var normalizedMarket = NormalizeMarketNameEx(marketName);
+        if (string.IsNullOrWhiteSpace(normalizedMarket))
+            return candidates.ToList();
+
+        return candidates
+            .Where(candidate =>
+            {
+                var normalizedVendor = NormalizeMarketNameEx(candidate.VendorName);
+                return !string.IsNullOrWhiteSpace(normalizedVendor) &&
+                       (normalizedVendor.Contains(normalizedMarket, StringComparison.OrdinalIgnoreCase) ||
+                        normalizedMarket.Contains(normalizedVendor, StringComparison.OrdinalIgnoreCase));
+            })
+            .ToList();
+    }
+
+    private static List<ShipmentSourceRow> FindPendingShipmentNameMatches(string orderName, IEnumerable<ShipmentSourceRow> candidates)
+    {
+        if (string.IsNullOrWhiteSpace(orderName))
+            return new List<ShipmentSourceRow>();
+
+        var normalizedOrderName = orderName.Trim();
+        return candidates
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.RecipientName))
+            .Where(candidate =>
+                normalizedOrderName.Contains(candidate.RecipientName, StringComparison.OrdinalIgnoreCase) ||
+                candidate.RecipientName.Contains(normalizedOrderName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private static string NormalizeMarketNameEx(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToLowerInvariant()
+            .Replace(" ", "")
+            .Replace("_", "")
+            .Replace("-", "")
+            .Replace("/", "")
+            .Replace("(", "")
+            .Replace(")", "")
+            .Replace(".", "")
+            .Replace("cafe24", "");
+    }
+
+    private void ApplyMatchResultOrderFlags()
+    {
+        foreach (var matchResult in _matchResults)
+        {
+            var order = FindOrderForMatch(matchResult);
+            matchResult.PendingShipment = order?.PendingShipment == true;
+            matchResult.PendingShipmentMessage = order?.PendingShipmentMessage ?? "";
+        }
+
+        _matchResults = _matchResults
+            .OrderByDescending(matchResult => matchResult.PendingShipment)
+            .ThenBy(matchResult => matchResult.MatchStatus == "unmatched" ? 1 : 0)
+            .ThenBy(matchResult => matchResult.Cafe24OrderId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
     // ═══════════════════════════════════════
     // 초기화: 인증 → 시트목록 → 발주사 자동 로드
     // ═══════════════════════════════════════
@@ -399,8 +685,10 @@ public partial class MainForm : Form
         var matchBtnPanel = new Panel { Dock = DockStyle.Top, Height = 36 };
         btnPush = new Button { Text = "✅ 확정 항목 반영", Width = 150, Height = 30, Location = new Point(4, 3) };
         var btnConfirmAll = new Button { Text = "전체 확정", Width = 90, Height = 30, Location = new Point(160, 3) };
+        btnDeliveryWaiting = new Button { Text = "배송 대기중", Width = 100, Height = 30, Location = new Point(256, 3) };
         btnConfirmAll.Click += (_, _) => ConfirmAllMatches();
-        matchBtnPanel.Controls.AddRange(new Control[] { btnPush, btnConfirmAll });
+        btnDeliveryWaiting.Click += (_, _) => MarkSelectedMatchesAsDeliveryWaiting();
+        matchBtnPanel.Controls.AddRange(new Control[] { btnPush, btnConfirmAll, btnDeliveryWaiting });
         subMatch.Controls.Add(dgvMatch);
         subMatch.Controls.Add(matchBtnPanel);
 
@@ -540,15 +828,18 @@ public partial class MainForm : Form
 
     private DataGridView CreateGridView()
     {
-        return new DataGridView
+        var grid = new DataGridView
         {
             Dock = DockStyle.Fill, ReadOnly = false,
             AllowUserToAddRows = false, AllowUserToDeleteRows = false,
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-            BackgroundColor = Color.White, RowHeadersVisible = false,
+            BackgroundColor = UiPalette.Background, RowHeadersVisible = false,
             Font = new Font("맑은 고딕", 9f)
         };
+
+        ApplyGridTheme(grid);
+        return grid;
     }
 
     private void WireEvents()
@@ -612,8 +903,11 @@ public partial class MainForm : Form
                 }
             }
 
+            var pendingShipmentCount = await ApplyPendingShipmentFlagsAsync(mergedOrders);
+
             _cafe24Orders = mergedOrders
-                .OrderByDescending(ParseOrderDateForSort)
+                .OrderByDescending(order => order.PendingShipment)
+                .ThenByDescending(ParseOrderDateForSort)
                 .ThenBy(order => order.OrderId, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
@@ -632,11 +926,17 @@ public partial class MainForm : Form
             ShowDataPreview();
 
             var summary = string.Join(" / ", marketSummaries);
+            var pendingSummary = pendingShipmentCount > 0
+                ? $" / 미출고 확인 {pendingShipmentCount}건" +
+                  (string.IsNullOrWhiteSpace(_pendingShipmentWindowLabel) ? "" : $" ({_pendingShipmentWindowLabel})")
+                : "";
             lblStatus.Text = $"✅ 출고대상 주문 {_cafe24Orders.Count}건 조회 완료" +
-                             (string.IsNullOrWhiteSpace(summary) ? "" : $" ({summary})");
+                             (string.IsNullOrWhiteSpace(summary) ? "" : $" ({summary})") +
+                             pendingSummary;
             lblStatus.ForeColor = Color.DarkGreen;
             _log.Info($"출고대상 주문 {_cafe24Orders.Count}건 캐시 완료" +
-                      (string.IsNullOrWhiteSpace(summary) ? "" : $" [{summary}]") );
+                      (string.IsNullOrWhiteSpace(summary) ? "" : $" [{summary}]") +
+                      (pendingShipmentCount > 0 ? $" / 미출고 확인 {pendingShipmentCount}건" : ""));
 
             tabShipSub.SelectedIndex = 0;
         }
@@ -689,7 +989,7 @@ public partial class MainForm : Form
         dgvData.Columns.Add(OrderProgressColumnNameEx, "진행사항");
 
         dgvData.Columns[OrderSelectColumnNameEx]!.Width = 50;
-        dgvData.Columns["Source"]!.Width = 70;
+        dgvData.Columns["Source"]!.Width = 120;
         dgvData.Columns["No"]!.Width = 40;
         dgvData.Columns["OrderId"]!.Width = 130;
         dgvData.Columns["Market"]!.Width = 90;
@@ -699,19 +999,21 @@ public partial class MainForm : Form
         dgvData.Columns["Name"]!.Width = 75;
         dgvData.Columns["Phone"]!.Width = 110;
         dgvData.Columns["OrderStatus"]!.Width = 80;
-        dgvData.Columns[OrderProgressColumnNameEx]!.Width = 80;
+        dgvData.Columns[OrderProgressColumnNameEx]!.Width = 110;
 
         for (int i = 0; i < _cafe24Orders.Count; i++)
         {
             var order = _cafe24Orders[i];
             var phone = string.IsNullOrWhiteSpace(order.RecipientCellPhone) ? order.RecipientPhone : order.RecipientCellPhone;
             var marketName = ResolveMarketDisplayName(order);
-            var sourceType = ResolveSourceTypeLabel(order);
-            var rowIndex = dgvData.Rows.Add(false, sourceType, i + 1, order.OrderId, marketName, order.OrderDate, order.ProductName,
-                order.Quantity, order.RecipientName, phone, order.OrderStatus, "조회완료");
+            var sourceLabel = ResolveSourceDisplayLabel(order);
+            var rowIndex = dgvData.Rows.Add(false, sourceLabel, i + 1, order.OrderId, marketName, order.OrderDate, order.ProductName,
+                order.Quantity, order.RecipientName, phone, order.OrderStatus, ResolveOrderProgressLabelEx(order));
             dgvData.Rows[rowIndex].Tag = order;
+            ApplyPreviewOrderProgressEx(dgvData.Rows[rowIndex], order);
         }
 
+        RefreshDataPreviewProgressStatesEx();
         UpdateOrderSelectionSummaryEx();
     }
     private async Task ExecuteMatchingAsync()
@@ -752,6 +1054,7 @@ public partial class MainForm : Form
 
             // 역방향 매칭: Cafe24 주문 기준 → 스프레드시트 검색
             _matchResults = await Task.Run(() => _matcher.ExecuteReverseMatching(_cafe24Orders, _filteredRows));
+            ApplyMatchResultOrderFlags();
             foreach (var mr in _matchResults)
             {
                 if (mr.SourceRowId > 0)
@@ -797,25 +1100,19 @@ public partial class MainForm : Form
         dgvMatch.Columns["MrId"]!.Width = 40;
         dgvMatch.Columns["Cafe24Market"]!.Width = 90;
         dgvMatch.Columns["Confidence"]!.Width = 70;
-        dgvMatch.Columns["MStatus"]!.Width = 80;
+        dgvMatch.Columns["MStatus"]!.Width = 100;
 
         for (int i = 0; i < _matchResults.Count; i++)
         {
             var mr = _matchResults[i];
             var marketName = ResolveMarketDisplayName(mr);
-            bool auto = mr.MatchStatus == "auto_confirmed";
+            var auto = mr.MatchStatus == "auto_confirmed" && !mr.PendingShipment;
             var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
                 mr.SourceTracking, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
-                mr.OrderProduct, ConfLabel(mr.Confidence), StatLabel(mr.MatchStatus));
+                mr.OrderProduct, ConfLabel(mr.Confidence), ResolveMatchStatusLabel(mr));
 
-            dgvMatch.Rows[idx].DefaultCellStyle.BackColor = mr.Confidence switch
-            {
-                "exact" => Color.FromArgb(220, 255, 220),
-                "probable" => Color.FromArgb(255, 255, 210),
-                "candidate" => Color.FromArgb(255, 240, 200),
-                "no_tracking" => Color.FromArgb(255, 230, 180),
-                _ => Color.FromArgb(255, 220, 220)
-            };
+            dgvMatch.Rows[idx].DefaultCellStyle.BackColor = ResolveMatchRowBackColor(mr);
+            dgvMatch.Rows[idx].DefaultCellStyle.ForeColor = UiPalette.Text;
         }
 
         _log.Info($"매칭: 전체 {_matchResults.Count} | " +
@@ -823,20 +1120,94 @@ public partial class MainForm : Form
             $"유력 {_matchResults.Count(m => m.Confidence == "probable")} | " +
             $"후보 {_matchResults.Count(m => m.Confidence == "candidate")} | " +
             $"송장없음 {_matchResults.Count(m => m.Confidence == "no_tracking")} | " +
-            $"미매칭 {_matchResults.Count(m => m.Confidence == "none")}");
+            $"미매칭 {_matchResults.Count(m => m.Confidence == "none")} | " +
+            $"미출고확인 {_matchResults.Count(m => m.PendingShipment)}");
     }
+
+    private static string ResolveMatchStatusLabel(MatchResult matchResult)
+    {
+        if (matchResult.PendingShipment)
+            return "미출고확인";
+
+        return StatLabel(matchResult.MatchStatus);
+    }
+
+    private static Color ResolveMatchRowBackColor(MatchResult matchResult)
+    {
+        if (matchResult.PendingShipment)
+            return UiPalette.PendingSurface;
+
+        return matchResult.Confidence switch
+        {
+            "exact" => UiPalette.SuccessSurface,
+            "probable" => UiPalette.Surface,
+            "candidate" => UiPalette.CandidateSurface,
+            "no_tracking" => UiPalette.WarningSurface,
+            _ => UiPalette.DangerSurface
+        };
+    }
+
     static string ConfLabel(string c) => c switch { "exact" => "✅ 확정", "probable" => "🟡 유력", "candidate" => "🟠 후보", "no_tracking" => "⚠️ 송장없음", _ => "❌ 없음" };
-    static string StatLabel(string s) => s switch { "auto_confirmed" => "자동확정", "confirmed" => "수동확정", "pending" => "대기", "pushed" => "반영완료", "push_failed" => "반영실패", "unmatched" => "미매칭", "no_tracking" => "송장미등록", _ => s };
+    static string StatLabel(string s) => s switch { "auto_confirmed" => "자동확정", "confirmed" => "수동확정", "pending" => "대기", "delivery_waiting" => "배송대기", "pushed" => "반영완료", "push_failed" => "반영실패", "unmatched" => "미매칭", "no_tracking" => "송장미등록", _ => s };
 
     private void ConfirmAllMatches()
     {
         for (int i = 0; i < dgvMatch.Rows.Count; i++)
         {
-            var c = dgvMatch.Rows[i].Cells["Confidence"]?.Value?.ToString() ?? "";
-            // 미매칭(없음)만 제외하고 전부 체크
-            if (!c.Contains("없음"))
+            var mrIdx = Convert.ToInt32(dgvMatch.Rows[i].Cells["MrId"]?.Value);
+            if (mrIdx < 0 || mrIdx >= _matchResults.Count)
+                continue;
+
+            var matchResult = _matchResults[mrIdx];
+            if (matchResult.PendingShipment || string.IsNullOrWhiteSpace(matchResult.Cafe24OrderId))
+                continue;
+
+            var confidence = dgvMatch.Rows[i].Cells["Confidence"]?.Value?.ToString() ?? "";
+            if (!confidence.Contains("없음"))
                 dgvMatch.Rows[i].Cells["Confirm"].Value = true;
         }
+    }
+
+    private void MarkSelectedMatchesAsDeliveryWaiting()
+    {
+        var changed = 0;
+        for (int i = 0; i < dgvMatch.Rows.Count; i++)
+        {
+            if (dgvMatch.Rows[i].Cells["Confirm"]?.Value is not true)
+                continue;
+
+            var mrIdx = Convert.ToInt32(dgvMatch.Rows[i].Cells["MrId"]?.Value);
+            if (mrIdx < 0 || mrIdx >= _matchResults.Count)
+                continue;
+
+            var matchResult = _matchResults[mrIdx];
+            if (matchResult.PendingShipment)
+                continue;
+
+            var order = FindOrderForMatch(matchResult);
+            if (order == null)
+                continue;
+
+            SetPersistedOrderProgressCodeEx(order, "delivery_waiting", saveState: false);
+            matchResult.MatchStatus = "delivery_waiting";
+            if (matchResult.Id > 0)
+                _db.UpdateMatchStatus(matchResult.Id, "delivery_waiting", true);
+            if (matchResult.SourceRowId > 0)
+                _db.UpdateSourceRowStatus(matchResult.SourceRowId, "delivery_waiting", matchResult.Cafe24OrderId);
+            changed++;
+        }
+
+        if (changed == 0)
+        {
+            MessageBox.Show("배송 대기중으로 표시할 확정 항목이 없습니다.", "알림");
+            return;
+        }
+
+        SaveEnhancedState();
+        RefreshDataPreviewProgressStatesEx();
+        ShowMatchResults();
+        tabShipSub.SelectedIndex = 1;
+        MessageBox.Show($"{changed}건을 배송 대기중으로 표시했습니다.", "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private ShipmentSourceRow? FindSourceRowForMatch(MatchResult matchResult)
@@ -879,7 +1250,20 @@ public partial class MainForm : Form
         }
 
         if (confirmed.Count == 0) { MessageBox.Show("확정된 항목이 없습니다.", "알림"); return; }
-        if (MessageBox.Show($"{confirmed.Count}건을 원본 마켓 API에 반영합니다.\n계속?",
+
+        var uploadBlocked = confirmed.Where(matchResult => matchResult.PendingShipment).ToList();
+        var readyToPush = confirmed.Where(matchResult => !matchResult.PendingShipment).ToList();
+        if (readyToPush.Count == 0)
+        {
+            MessageBox.Show("선택한 항목이 모두 미출고 확인 대상으로 막혀 있습니다.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var confirmationMessage = $"{readyToPush.Count}건을 원본 마켓 API에 반영합니다.";
+        if (uploadBlocked.Count > 0)
+            confirmationMessage += $"\n미출고 확인 {uploadBlocked.Count}건은 자동으로 제외됩니다.";
+        confirmationMessage += "\n계속?";
+        if (MessageBox.Show(confirmationMessage,
             "반영 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
         btnPush.Enabled = false;
@@ -903,7 +1287,14 @@ public partial class MainForm : Form
 
         try
         {
-            var duplicateTargetTrackings = confirmed
+            foreach (var blocked in uploadBlocked)
+            {
+                var blockedMarket = ResolveMarketDisplayName(blocked);
+                var blockedIdx = dgvResult.Rows.Add(blockedMarket, blocked.Cafe24OrderId, blocked.SourceTracking, "SKIP", blocked.PendingShipmentMessage);
+                dgvResult.Rows[blockedIdx].DefaultCellStyle.BackColor = UiPalette.PendingSurface;
+            }
+
+            var duplicateTargetTrackings = readyToPush
                 .Select(mr =>
                 {
                     var api = FindApiClient(mr.Cafe24MallId);
@@ -927,7 +1318,7 @@ public partial class MainForm : Form
 
             var attemptedTargets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var mr in confirmed)
+            foreach (var mr in readyToPush)
             {
                 var marketName = ResolveMarketDisplayName(mr);
                 var api = FindApiClient(mr.Cafe24MallId);
@@ -944,9 +1335,16 @@ public partial class MainForm : Form
                 if (order == null)
                 {
                     var missingOrderIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, "", "❌ 실패", "캐시된 주문 원본을 찾지 못했습니다.");
-                    dgvResult.Rows[missingOrderIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
+                    dgvResult.Rows[missingOrderIdx].DefaultCellStyle.BackColor = UiPalette.DangerSurface;
                     _log.Error($"캐시 주문 없음: {marketName} ({mr.Cafe24MallId}) / 주문 {mr.Cafe24OrderId} / 아이템 {mr.Cafe24OrderItemCode}");
                     fail++;
+                    continue;
+                }
+
+                if (order.PendingShipment)
+                {
+                    var blockedIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, mr.SourceTracking, "SKIP", order.PendingShipmentMessage);
+                    dgvResult.Rows[blockedIdx].DefaultCellStyle.BackColor = UiPalette.PendingSurface;
                     continue;
                 }
 
@@ -1020,13 +1418,17 @@ public partial class MainForm : Form
                 _db.UpdateMatchStatus(mr.Id, nextStatus, true);
                 if (sourceRowId > 0)
                     _db.UpdateSourceRowStatus(sourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
+                if (success)
+                    SetPersistedOrderProgressCodeEx(order, "pushed", saveState: false);
 
                 var idx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, tracking,
                     success ? "✅ 성공" : $"❌ 실패 ({status})", resp.Length > 200 ? resp[..200] : resp);
-                dgvResult.Rows[idx].DefaultCellStyle.BackColor = success ? Color.FromArgb(220, 255, 220) : Color.FromArgb(255, 220, 220);
+                dgvResult.Rows[idx].DefaultCellStyle.BackColor = success ? UiPalette.SuccessSurface : UiPalette.DangerSurface;
                 if (success) ok++; else fail++;
             }
 
+            SaveEnhancedState();
+            RefreshDataPreviewProgressStatesEx();
             _log.Info($"반영 완료: 성공 {ok}, 실패 {fail}");
             tabShipSub.SelectedIndex = 2;
         }
@@ -1139,6 +1541,10 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
+
+
+
+
 
 
 

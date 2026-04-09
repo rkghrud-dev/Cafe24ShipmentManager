@@ -18,4 +18,7 @@ public class Cafe24Order
     public string ShippingCode { get; set; } = "";
     public string RawJson { get; set; } = "";
     public string CachedAt { get; set; } = "";
+    public bool PendingShipment { get; set; }
+    public string PendingShipmentMessage { get; set; } = "";
+    public string PendingShipmentDateLabel { get; set; } = "";
 }

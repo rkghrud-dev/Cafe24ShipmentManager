@@ -1,14 +1,19 @@
 using Google.Apis.Auth.OAuth2;
+using Google.Apis.Auth.OAuth2.Flows;
+using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Services;
 using Google.Apis.Sheets.v4;
 using Google.Apis.Util.Store;
 using Cafe24ShipmentManager.Models;
 using Newtonsoft.Json;
+using System.Text.RegularExpressions;
 
 namespace Cafe24ShipmentManager.Services;
 
 public class GoogleSheetsReader
 {
+    private static readonly string[] GoogleSheetsScopes = { SheetsService.Scope.Spreadsheets };
+
     private readonly SheetsService _service;
     private readonly AppLogger _log;
 
@@ -23,6 +28,9 @@ public class GoogleSheetsReader
         "택배사", "배송사", "운송사", "택배", "배송업체", "운송업체"
     };
 
+    private static readonly Regex DateMarkerPattern = new(@"^20\d{2}\.\d{1,2}\.\d{1,2}$", RegexOptions.Compiled);
+
+
     private GoogleSheetsReader(SheetsService service, AppLogger logger)
     {
         _service = service;
@@ -34,29 +42,94 @@ public class GoogleSheetsReader
     /// </summary>
     public static async Task<GoogleSheetsReader> CreateAsync(string credentialJsonPath, AppLogger logger)
     {
-        UserCredential credential;
-        using (var stream = new FileStream(credentialJsonPath, FileMode.Open, FileAccess.Read))
-        {
-            // 토큰은 프로그램 폴더의 token 폴더에 저장 (재로그인 불필요)
-            var tokenPath = Path.Combine(
-                Path.GetDirectoryName(credentialJsonPath) ?? ".", "token");
+        var tokenPath = Path.Combine(
+            Path.GetDirectoryName(credentialJsonPath) ?? ".", "token");
 
-            credential = await GoogleWebAuthorizationBroker.AuthorizeAsync(
-                GoogleClientSecrets.FromStream(stream).Secrets,
-                new[] { SheetsService.Scope.Spreadsheets },
-                "user",
-                CancellationToken.None,
-                new FileDataStore(tokenPath, true));
+        UserCredential credential;
+        try
+        {
+            credential = await AuthorizeAsync(credentialJsonPath, tokenPath, forceConsent: false);
+            await credential.GetAccessTokenForRequestAsync();
+        }
+        catch (TokenResponseException ex) when (IsInvalidGrant(ex))
+        {
+            logger.Warn("저장된 Google 토큰이 만료 또는 폐기되었습니다. 토큰 캐시를 삭제하고 재인증합니다.");
+            ResetTokenCache(tokenPath, logger);
+
+            credential = await AuthorizeAsync(credentialJsonPath, tokenPath, forceConsent: true);
+            await credential.GetAccessTokenForRequestAsync();
         }
 
-        var service = new SheetsService(new BaseClientService.Initializer
+        var service = CreateSheetsService(credential);
+
+        logger.Info("Google OAuth2 자격 확인 완료");
+        return new GoogleSheetsReader(service, logger);
+    }
+
+    private static async Task<UserCredential> AuthorizeAsync(
+        string credentialJsonPath,
+        string tokenPath,
+        bool forceConsent)
+    {
+        using var stream = new FileStream(credentialJsonPath, FileMode.Open, FileAccess.Read);
+        var secrets = GoogleClientSecrets.FromStream(stream).Secrets;
+        var dataStore = new FileDataStore(tokenPath, true);
+
+        if (!forceConsent)
+        {
+            return await GoogleWebAuthorizationBroker.AuthorizeAsync(
+                secrets,
+                GoogleSheetsScopes,
+                "user",
+                CancellationToken.None,
+                dataStore);
+        }
+
+        var initializer = new GoogleAuthorizationCodeFlow.Initializer
+        {
+            ClientSecrets = secrets,
+            Prompt = "consent"
+        };
+
+        return await GoogleWebAuthorizationBroker.AuthorizeAsync(
+            initializer,
+            GoogleSheetsScopes,
+            "user",
+            CancellationToken.None,
+            dataStore);
+    }
+
+    private static SheetsService CreateSheetsService(UserCredential credential)
+    {
+        return new SheetsService(new BaseClientService.Initializer
         {
             HttpClientInitializer = credential,
             ApplicationName = "Cafe24ShipmentManager"
         });
+    }
 
-        logger.Info("Google OAuth2 인증 완료 (브라우저 로그인)");
-        return new GoogleSheetsReader(service, logger);
+    private static bool IsInvalidGrant(TokenResponseException ex)
+    {
+        return string.Equals(ex.Error?.Error, "invalid_grant", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ResetTokenCache(string tokenPath, AppLogger logger)
+    {
+        if (!Directory.Exists(tokenPath))
+            return;
+
+        try
+        {
+            foreach (var filePath in Directory.EnumerateFiles(tokenPath, "*", SearchOption.AllDirectories))
+                File.SetAttributes(filePath, FileAttributes.Normal);
+
+            Directory.Delete(tokenPath, true);
+            logger.Info($"Google 토큰 캐시 초기화: {tokenPath}");
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"Google 토큰 캐시 초기화 실패: {ex.Message}");
+        }
     }
 
     public List<(string title, int sheetId)> GetSheetList(string spreadsheetId)
@@ -277,6 +350,187 @@ public class GoogleSheetsReader
         _log.Info($"구글시트 '{sheetName}' 읽기 완료: {result.Rows.Count}행, 발주사 {result.Vendors.Count}개");
         return result;
     }
+    public PendingShipmentSheetReadResult ReadPendingShipmentSheet(string spreadsheetId, string sheetName)
+    {
+        var result = new PendingShipmentSheetReadResult();
+
+        var range = $"'{sheetName}'!A1:ZZ30000";
+        var request = _service.Spreadsheets.Values.Get(spreadsheetId, range);
+        request.ValueRenderOption = SpreadsheetsResource.ValuesResource.GetRequest.ValueRenderOptionEnum.FORMATTEDVALUE;
+
+        var response = request.Execute();
+        var values = response.Values;
+        if (values == null || values.Count < 2)
+        {
+            _log.Warn($"미출고 시트 '{sheetName}'에 데이터가 없거나 부족합니다.");
+            return result;
+        }
+
+        var rows = values
+            .Select(row => row.Select(cell => CleanValue(cell?.ToString())).ToList())
+            .ToList();
+
+        var headerRowIndex = DetectHeaderRow(rows);
+        var headerRow = rows[headerRowIndex];
+        var phoneColumnIndex = DetectPhoneColumn(headerRow);
+        var shippingCompanyColumnIndex = DetectShippingCompanyColumn(headerRow);
+        var pendingWindow = DetectPendingWindow(rows, headerRowIndex);
+
+        result.PreviousDateLabel = pendingWindow.PreviousDateLabel;
+        result.LatestDateLabel = pendingWindow.LatestDateLabel;
+        result.WindowLabel = pendingWindow.WindowLabel;
+
+        if (!pendingWindow.HasWindow)
+        {
+            _log.Warn($"미출고 시트 '{sheetName}'에서 최신 날짜 구간을 찾지 못했습니다.");
+            return result;
+        }
+
+        for (int rowIndex = headerRowIndex + 1; rowIndex < rows.Count; rowIndex++)
+        {
+            if (!pendingWindow.Contains(rowIndex))
+                continue;
+
+            var cells = rows[rowIndex];
+            string GetCell(int col) => GetCellValue(cells, col);
+
+            var vendor = GetCell(2);
+            if (string.IsNullOrWhiteSpace(vendor))
+                continue;
+
+            var tracking = NormalizeTracking(GetCell(11));
+            var recipientName = GetCell(5);
+            var phone = phoneColumnIndex >= 0 ? GetCell(phoneColumnIndex) : GetCell(6);
+            var shippingCompany = shippingCompanyColumnIndex >= 0 ? GetCell(shippingCompanyColumnIndex) : "";
+            var normalizedPhone = PhoneNormalizer.Normalize(phone);
+            var sourceKey = $"{vendor}|{normalizedPhone}|{recipientName}|{tracking}|{rowIndex}";
+
+            result.Rows.Add(new ShipmentSourceRow
+            {
+                SourceRowKey = sourceKey,
+                VendorName = vendor,
+                TrackingNumber = tracking,
+                RecipientPhone = normalizedPhone,
+                RecipientName = recipientName,
+                ShippingCompany = shippingCompany,
+                ProcessStatus = "pending_shipment",
+                ImportedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                SheetRowIndex = rowIndex,
+                PendingShipment = true,
+                PendingShipmentDateLabel = pendingWindow.LatestDateLabel
+            });
+        }
+
+        _log.Info($"미출고 시트 '{sheetName}' 읽기 완료: 최신 구간 {result.WindowLabel}, 대상 {result.Rows.Count}행");
+        return result;
+    }
+
+    private static int DetectHeaderRow(List<List<string>> rows)
+    {
+        int headerRowIndex = 0;
+        int maxKeywordHits = -1;
+
+        for (int rowIndex = 0; rowIndex < Math.Min(rows.Count, 10); rowIndex++)
+        {
+            var rowText = string.Join(" ", rows[rowIndex]);
+            var hits = HeaderKeywords.Count(keyword => rowText.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+            if (hits > maxKeywordHits)
+            {
+                maxKeywordHits = hits;
+                headerRowIndex = rowIndex;
+            }
+        }
+
+        return headerRowIndex;
+    }
+
+    private static int DetectPhoneColumn(IReadOnlyList<string> headers)
+    {
+        for (int index = 0; index < headers.Count; index++)
+        {
+            var normalized = NormalizeHeader(headers[index]);
+            if (PhoneKeywords.Any(keyword => normalized.Contains(NormalizeHeader(keyword), StringComparison.OrdinalIgnoreCase)))
+                return index;
+        }
+
+        var fallbackKeywords = new[] { "전화", "폰", "휴대", "HP", "Phone", "Cell", "연락" };
+        for (int index = 0; index < headers.Count; index++)
+        {
+            var normalized = NormalizeHeader(headers[index]);
+            if (fallbackKeywords.Any(keyword => normalized.Contains(NormalizeHeader(keyword), StringComparison.OrdinalIgnoreCase)))
+                return index;
+        }
+
+        return headers.Count > 6 ? 6 : -1;
+    }
+
+    private static int DetectShippingCompanyColumn(IReadOnlyList<string> headers)
+    {
+        for (int index = 0; index < headers.Count; index++)
+        {
+            var normalized = NormalizeHeader(headers[index]);
+            if (ShippingCompanyKeywords.Any(keyword => normalized.Contains(NormalizeHeader(keyword), StringComparison.OrdinalIgnoreCase)))
+                return index;
+        }
+
+        return -1;
+    }
+
+    private static PendingShipmentWindow DetectPendingWindow(List<List<string>> rows, int headerRowIndex)
+    {
+        var latestDate = "";
+        var latestDateRowIndex = -1;
+
+        for (int rowIndex = rows.Count - 1; rowIndex > headerRowIndex; rowIndex--)
+        {
+            var dateMarker = ExtractDateMarker(rows[rowIndex]);
+            if (string.IsNullOrWhiteSpace(dateMarker))
+                continue;
+
+            if (latestDateRowIndex < 0)
+            {
+                latestDate = dateMarker;
+                latestDateRowIndex = rowIndex;
+                continue;
+            }
+
+            if (!string.Equals(latestDate, dateMarker, StringComparison.OrdinalIgnoreCase))
+                return new PendingShipmentWindow(dateMarker, latestDate, rowIndex, latestDateRowIndex);
+        }
+
+        return PendingShipmentWindow.None;
+    }
+
+    private static string ExtractDateMarker(IReadOnlyList<string> row)
+    {
+        var cell = GetCellValue(row, 0);
+        return IsDateMarker(cell) ? cell : "";
+    }
+
+    private static bool IsDateMarker(string value)
+        => DateMarkerPattern.IsMatch(CleanValue(value));
+
+    private static string NormalizeHeader(string value)
+    {
+        return CleanValue(value)
+            .ToLowerInvariant()
+            .Replace(" ", "")
+            .Replace("_", "")
+            .Replace("-", "")
+            .Replace("/", "")
+            .Replace("(", "")
+            .Replace(")", "")
+            .Replace(".", "");
+    }
+
+    private static string NormalizeTracking(string value)
+        => new(CleanValue(value).Where(char.IsLetterOrDigit).ToArray());
+
+    private static string GetCellValue(IReadOnlyList<string> row, int index)
+        => index >= 0 && index < row.Count ? CleanValue(row[index]) : "";
+
+    private static string CleanValue(string? value)
+        => value?.Trim() ?? "";
     public RawSheetData ReadRawSheet(string spreadsheetId, string sheetName, int maxRows = 500)
     {
         var result = new RawSheetData();
@@ -333,9 +587,47 @@ public class GoogleSheetsReader
     }
 
 }
+public class PendingShipmentSheetReadResult
+{
+    public List<ShipmentSourceRow> Rows { get; set; } = new();
+    public string PreviousDateLabel { get; set; } = "";
+    public string LatestDateLabel { get; set; } = "";
+    public string WindowLabel { get; set; } = "";
+}
+
+internal sealed class PendingShipmentWindow
+{
+    public static readonly PendingShipmentWindow None = new("", "", -1, -1);
+
+    public PendingShipmentWindow(string previousDateLabel, string latestDateLabel, int previousDateRowIndex, int latestDateRowIndex)
+    {
+        PreviousDateLabel = previousDateLabel;
+        LatestDateLabel = latestDateLabel;
+        PreviousDateRowIndex = previousDateRowIndex;
+        LatestDateRowIndex = latestDateRowIndex;
+    }
+
+    public string PreviousDateLabel { get; }
+    public string LatestDateLabel { get; }
+    public int PreviousDateRowIndex { get; }
+    public int LatestDateRowIndex { get; }
+    public bool HasWindow => PreviousDateRowIndex >= 0 && LatestDateRowIndex >= 0;
+    public string WindowLabel => string.IsNullOrWhiteSpace(PreviousDateLabel) || string.IsNullOrWhiteSpace(LatestDateLabel)
+        ? ""
+        : $"{PreviousDateLabel} ~ {LatestDateLabel}";
+
+    public bool Contains(int rowIndex)
+        => HasWindow && rowIndex > PreviousDateRowIndex && rowIndex < LatestDateRowIndex;
+}
+
 public class RawSheetData
 {
     public List<string> Headers { get; set; } = new();
     public List<List<string>> Rows { get; set; } = new();
 }
+
+
+
+
+
 
