@@ -18,7 +18,7 @@
             android:id="@+id/cbMarketConfigEnabled"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="표시"
+            android:text="사용"
             android:textColor="@color/ship_text_primary"
             app:buttonTint="@color/ship_primary" />
 
@@ -52,6 +52,21 @@
         android:layout_marginTop="4dp"
         android:textColor="@color/ship_text_secondary"
         android:textSize="11sp" />
+
+    <TextView
+        android:id="@+id/tvMarketConfigBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_status_chip_warning"
+        android:paddingStart="10dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="4dp"
+        android:text="확인 필요"
+        android:textColor="@color/ship_warning"
+        android:textSize="10sp"
+        android:textStyle="bold" />
 
     <TextView
         android:id="@+id/tvMarketConfigStatus"

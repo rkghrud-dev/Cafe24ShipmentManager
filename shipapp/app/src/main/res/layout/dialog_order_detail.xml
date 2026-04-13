@@ -14,10 +14,44 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
+        <TextView
+            android:id="@+id/tvTrackingInputLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="송장번호 입력"
+            android:textColor="@color/ship_text_primary"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/etDetailTracking"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_tracking_input"
+            android:hint="송장번호 입력"
+            android:importantForAutofill="no"
+            android:inputType="text"
+            android:maxLines="1"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:textColor="@color/ship_text_primary"
+            android:textColorHint="@color/ship_text_secondary"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tvTrackingInputHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="@color/ship_text_secondary"
+            android:textSize="12sp" />
+
         <LinearLayout
             android:id="@+id/layoutDetailTable"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
             android:background="@drawable/bg_order_detail_table"
             android:orientation="vertical" />
     </LinearLayout>

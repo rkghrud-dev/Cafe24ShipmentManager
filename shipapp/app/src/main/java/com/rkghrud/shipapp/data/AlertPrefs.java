@@ -3,26 +3,26 @@ package com.rkghrud.shipapp.data;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import org.json.JSONArray;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 public final class AlertPrefs {
     private static final String PREFS = "shipapp_alert_prefs";
     private static final int DEFAULT_POLLING_INTERVAL = 15;
     private static final int DEFAULT_SCHEDULED_DAYS = 0b0011111; // 월-금
+    private static final int MAX_KNOWN_ORDER_KEYS = 2000;
 
-    // 주기 조회 알림
     public static final String KEY_POLLING_ENABLED = "polling_enabled";
-    public static final String KEY_POLLING_INTERVAL = "polling_interval";   // 분: 15, 20, 30
-
-    // 지정 시간 알림
+    public static final String KEY_POLLING_INTERVAL = "polling_interval";
     public static final String KEY_SCHEDULED_ENABLED = "scheduled_enabled";
-    public static final String KEY_SCHEDULED_HOUR = "scheduled_hour";       // 0-23
-    public static final String KEY_SCHEDULED_MINUTE = "scheduled_minute";   // 0-59
-    public static final String KEY_SCHEDULED_DAYS = "scheduled_days";       // bitmask bit0=월..bit6=일
-
-    // 진동
+    public static final String KEY_SCHEDULED_HOUR = "scheduled_hour";
+    public static final String KEY_SCHEDULED_MINUTE = "scheduled_minute";
+    public static final String KEY_SCHEDULED_DAYS = "scheduled_days";
     public static final String KEY_VIBRATE = "vibrate_enabled";
-
-    // 신규 주문 비교용 마지막 카운트
     public static final String KEY_LAST_ORDER_COUNT = "last_order_count";
+    public static final String KEY_KNOWN_ORDER_KEYS = "known_order_keys";
 
     private AlertPrefs() {
     }
@@ -61,7 +61,6 @@ public final class AlertPrefs {
         return prefs(context).getInt(KEY_SCHEDULED_MINUTE, 0);
     }
 
-    /** bitmask: bit0=월, bit1=화, ..., bit6=일 */
     public static int getScheduledDays(Context context) {
         return prefs(context).getInt(KEY_SCHEDULED_DAYS, DEFAULT_SCHEDULED_DAYS);
     }
@@ -84,5 +83,45 @@ public final class AlertPrefs {
 
     public static void saveLastOrderCount(Context context, int count) {
         prefs(context).edit().putInt(KEY_LAST_ORDER_COUNT, count).apply();
+    }
+
+    public static Set<String> getKnownOrderKeys(Context context) {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        String raw = prefs(context).getString(KEY_KNOWN_ORDER_KEYS, "[]");
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                String value = array.optString(i, "").trim();
+                if (!value.isEmpty()) {
+                    keys.add(value);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return keys;
+    }
+
+    public static void saveKnownOrderKeys(Context context, Iterable<String> keys) {
+        JSONArray array = new JSONArray();
+        int count = 0;
+        for (String key : keys) {
+            if (key == null) {
+                continue;
+            }
+            String trimmed = key.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            array.put(trimmed);
+            count++;
+            if (count >= MAX_KNOWN_ORDER_KEYS) {
+                break;
+            }
+        }
+        prefs(context).edit().putString(KEY_KNOWN_ORDER_KEYS, array.toString()).apply();
+    }
+
+    public static void clearKnownOrderKeys(Context context) {
+        prefs(context).edit().remove(KEY_KNOWN_ORDER_KEYS).apply();
     }
 }

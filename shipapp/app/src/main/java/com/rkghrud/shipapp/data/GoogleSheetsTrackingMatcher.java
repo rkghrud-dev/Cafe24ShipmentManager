@@ -26,15 +26,24 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 public final class GoogleSheetsTrackingMatcher {
     private static final String TOKEN_URL = "https://oauth2.googleapis.com/token";
     private static final String SHEETS_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets/";
     private static final String SPREADSHEET_ID = BuildConfig.GOOGLE_SHEETS_SPREADSHEET_ID;
     private static final String SHEET_NAME = BuildConfig.GOOGLE_SHEETS_SHEET_NAME;
+    private static final String LIVE_TRACKING_SHEET_NAME = "CJ발주서";
+    private static final String LIVE_PENDING_SHEET_NAME = "미출고정보";
     private static final String CLIENT_ID = BuildConfig.GOOGLE_SHEETS_CLIENT_ID;
     private static final String CLIENT_SECRET = BuildConfig.GOOGLE_SHEETS_CLIENT_SECRET;
     private static final String REFRESH_TOKEN = BuildConfig.GOOGLE_SHEETS_REFRESH_TOKEN;
+    private static final String CJ_SHIPPING_COMPANY = "CJ대한통운";
+    private static final int DEFAULT_VENDOR_COLUMN_INDEX = 2;
+    private static final int DEFAULT_RECIPIENT_NAME_COLUMN_INDEX = 5;
+    private static final int DEFAULT_PHONE_COLUMN_INDEX = 6;
+    private static final int DEFAULT_TRACKING_COLUMN_INDEX = 11;
+    private static final Pattern DATE_MARKER_PATTERN = Pattern.compile("^20\\d{2}\\.\\d{1,2}\\.\\d{1,2}$");
 
     private static final Set<String> NON_SPECIFIC_FALLBACK_NAMES = new HashSet<>(Arrays.asList(
             "집", "자택", "회사", "배송지", "수령인", "받는분", "고객", "고객님", "주문자", "테스트"
@@ -64,18 +73,59 @@ public final class GoogleSheetsTrackingMatcher {
 
     public static MatchResult applyToOrders(List<DispatchOrder> orders) throws Exception {
         if (orders == null || orders.isEmpty()) {
-            return new MatchResult("구글시트 " + SHEET_NAME, 0, 0, 0, 0, 0, 0, 0);
+            return new MatchResult(buildLiveMatchSourceName(orders), 0, 0, 0, 0, 0, 0, 0, 0, "");
         }
 
-        ParsedSheet parsedSheet = readConfiguredSheet();
-        return applyRowsToOrders(parsedSheet, orders);
-    }
-
-    private static ParsedSheet readConfiguredSheet() throws Exception {
         ensureConfigured();
         String accessToken = refreshAccessToken();
+        ParsedSheet trackingSheet = scopeParsedSheetToOrders(readLiveSheet(accessToken, LIVE_TRACKING_SHEET_NAME, false), orders);
+        ParsedSheet pendingSheet = scopeParsedSheetToOrders(readLiveSheet(accessToken, LIVE_PENDING_SHEET_NAME, true), orders);
+        ParsedSheet combinedSheet = mergeParsedSheets(trackingSheet, pendingSheet);
+        return applyRowsToOrders(combinedSheet, orders, buildLiveMatchSourceName(orders));
+    }
+
+    private static ParsedSheet readLiveSheet(String accessToken, String sheetName, boolean pendingShipment) throws Exception {
+        List<List<String>> rows = readSheetRows(accessToken, sheetName);
+        int headerRowIndex = detectHeaderRow(rows);
+        List<String> headersRow = rows.get(headerRowIndex);
+        int phoneColumnIndex = detectPhoneColumn(headersRow);
+        int trackingColumnIndex = detectTrackingColumn(headersRow);
+
+        List<SheetRow> parsedRows = new ArrayList<>();
+        int trackingRowCount = 0;
+        for (int rowIndex = headerRowIndex + 1; rowIndex < rows.size(); rowIndex++) {
+            List<String> row = rows.get(rowIndex);
+            String vendorName = getCell(row, DEFAULT_VENDOR_COLUMN_INDEX);
+            if (vendorName.isEmpty()) {
+                continue;
+            }
+
+            String recipientPhone = phoneColumnIndex >= 0 ? getCell(row, phoneColumnIndex) : getCell(row, DEFAULT_PHONE_COLUMN_INDEX);
+            String normalizedPhone = PhoneNormalizer.normalize(recipientPhone);
+            String recipientName = getCell(row, DEFAULT_RECIPIENT_NAME_COLUMN_INDEX);
+            String trackingNumber = pendingShipment ? "" : normalizeTracking(getCell(row, trackingColumnIndex));
+            if (!trackingNumber.isEmpty()) {
+                trackingRowCount++;
+            }
+
+            parsedRows.add(new SheetRow(
+                    rowIndex,
+                    sheetName + "|" + vendorName + "|" + normalizedPhone + "|" + recipientName + "|" + rowIndex,
+                    vendorName,
+                    trackingNumber,
+                    normalizedPhone,
+                    recipientName,
+                    pendingShipment ? "" : CJ_SHIPPING_COMPANY,
+                    pendingShipment
+            ));
+        }
+
+        return new ParsedSheet(parsedRows.size(), trackingRowCount, parsedRows, PendingWindow.NONE);
+    }
+
+    private static List<List<String>> readSheetRows(String accessToken, String sheetName) throws Exception {
         String url = SHEETS_BASE_URL + SPREADSHEET_ID + "/values:batchGet"
-                + "?ranges=" + urlEncode(SHEET_NAME)
+                + "?ranges=" + urlEncode(sheetName)
                 + "&majorDimension=ROWS"
                 + "&valueRenderOption=FORMATTED_VALUE";
 
@@ -85,110 +135,311 @@ public final class GoogleSheetsTrackingMatcher {
 
         HttpResult response = executeJsonRequest("GET", url, null, headers);
         if (!response.isSuccessful()) {
-            throw new IllegalArgumentException("구글시트 조회 실패 " + response.statusCode + ": " + clip(response.body));
+            throw new IllegalArgumentException(sheetName + " 시트 조회 실패 " + response.statusCode + ": " + clip(response.body));
         }
 
-        List<List<String>> rows = parseRowsFromSheetsResponse(response.body);
+        return parseRowsFromSheetsResponse(response.body);
+    }
 
-        int headerRowIndex = detectHeaderRow(rows);
-        List<String> headersRow = rows.get(headerRowIndex);
-        int phoneColumnIndex = detectPhoneColumn(headersRow);
-        int shippingCompanyColumnIndex = detectShippingCompanyColumn(headersRow);
+    private static int detectTrackingColumn(List<String> headers) {
+        for (int index = 0; index < headers.size(); index++) {
+            String normalized = normalizeHeader(headers.get(index));
+            if (normalized.contains(normalizeHeader("송장번호"))
+                    || normalized.contains(normalizeHeader("운송장번호"))
+                    || normalized.contains(normalizeHeader("송장"))
+                    || normalized.contains(normalizeHeader("운송장"))) {
+                return index;
+            }
+        }
+        return headers.size() > DEFAULT_TRACKING_COLUMN_INDEX ? DEFAULT_TRACKING_COLUMN_INDEX : -1;
+    }
 
-        List<SheetRow> parsedRows = new ArrayList<>();
+    private static ParsedSheet mergeParsedSheets(ParsedSheet trackingSheet, ParsedSheet pendingSheet) {
+        List<SheetRow> mergedRows = new ArrayList<>();
+        int sheetRowCount = 0;
         int trackingRowCount = 0;
-        for (int rowIndex = headerRowIndex + 1; rowIndex < rows.size(); rowIndex++) {
-            List<String> row = rows.get(rowIndex);
-            String vendorName = getCell(row, 2);
-            if (vendorName.isEmpty()) {
-                continue;
-            }
 
-            String trackingNumber = normalizeTracking(getCell(row, 11));
-            if (!trackingNumber.isEmpty()) {
-                trackingRowCount++;
-            }
-
-            String recipientPhone = phoneColumnIndex >= 0 ? getCell(row, phoneColumnIndex) : getCell(row, 6);
-            String normalizedPhone = PhoneNormalizer.normalize(recipientPhone);
-            String recipientName = getCell(row, 5);
-            String shippingCompany = shippingCompanyColumnIndex >= 0 ? getCell(row, shippingCompanyColumnIndex) : "";
-            String sourceRowKey = vendorName + "|" + normalizedPhone + "|" + recipientName + "|" + trackingNumber + "|" + rowIndex;
-
-            parsedRows.add(new SheetRow(rowIndex, sourceRowKey, vendorName, trackingNumber, normalizedPhone, recipientName, shippingCompany));
+        if (trackingSheet != null) {
+            sheetRowCount += trackingSheet.sheetRowCount;
+            trackingRowCount += trackingSheet.trackingRowCount;
+            mergedRows.addAll(trackingSheet.rows);
+        }
+        if (pendingSheet != null) {
+            sheetRowCount += pendingSheet.sheetRowCount;
+            trackingRowCount += pendingSheet.trackingRowCount;
+            mergedRows.addAll(pendingSheet.rows);
         }
 
-        return new ParsedSheet(rows.size(), trackingRowCount, parsedRows);
+        return new ParsedSheet(sheetRowCount, trackingRowCount, mergedRows, PendingWindow.NONE);
     }
 
     static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
-        Map<String, List<SheetRow>> phoneIndex = new HashMap<>();
+        return applyRowsToOrders(parsedSheet, orders, buildMatchSourceName(parsedSheet, orders));
+    }
 
-        for (SheetRow row : parsedSheet.rows) {
-            if (!row.recipientPhone.isEmpty()) {
-                phoneIndex.computeIfAbsent(row.recipientPhone, key -> new ArrayList<>()).add(row);
-            }
-        }
+    private static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders, String sourceName) {
+        Map<String, List<SheetRow>> trackingPhoneIndex = buildPhoneIndex(parsedSheet.rows, false);
+        Map<String, List<SheetRow>> pendingPhoneIndex = buildPhoneIndex(parsedSheet.rows, true);
 
         int matchedCount = 0;
         int noTrackingCount = 0;
         int unmatchedCount = 0;
         int candidateCount = 0;
         int nameFallbackCount = 0;
+        int pendingBlockedCount = 0;
 
         for (DispatchOrder order : orders) {
-            List<SheetRow> candidates = new ArrayList<>();
-            addCandidates(candidates, phoneIndex, order.recipientCellPhone);
-            addCandidates(candidates, phoneIndex, order.recipientPhone);
-            candidates = dedupeCandidates(candidates);
-            if (candidates.isEmpty()) {
-                unmatchedCount++;
-                continue;
-            }
+            order.clearTrackingMatchState();
 
-            List<SheetRow> withTracking = new ArrayList<>();
-            for (SheetRow candidate : candidates) {
-                if (!candidate.trackingNumber.isEmpty()) {
-                    withTracking.add(candidate);
+            OrderMatchResolution trackingResolution = resolveTrackingMatch(order, trackingPhoneIndex);
+            OrderMatchResolution pendingResolution = resolvePendingMatch(order, pendingPhoneIndex);
+            boolean pendingMatched = pendingResolution.state == MatchState.PENDING_NO_TRACKING;
+
+            if (pendingMatched) {
+                if (trackingResolution.state == MatchState.MATCHED) {
+                    applyMatchedTracking(order, trackingResolution.matchedRow, false);
+                    matchedCount++;
                 }
-            }
-
-            if (withTracking.isEmpty()) {
-                noTrackingCount++;
+                order.markPendingShipment("미출고 확인 필요", pendingResolution.matchedRow.rowIndex);
+                pendingBlockedCount++;
                 continue;
             }
 
-            List<SheetRow> marketMatches = findMarketMatches(order.marketName, withTracking);
-            if (marketMatches.isEmpty()) {
-                unmatchedCount++;
+            if (trackingResolution.state == MatchState.MATCHED) {
+                applyMatchedTracking(order, trackingResolution.matchedRow, true);
+                matchedCount++;
                 continue;
             }
 
-            List<SheetRow> nameMatches = findNameMatches(order.recipientName, marketMatches);
-            if (nameMatches.size() != 1) {
+            if (trackingResolution.state == MatchState.CANDIDATE || pendingResolution.state == MatchState.CANDIDATE) {
                 candidateCount++;
                 continue;
             }
 
-            SheetRow matched = nameMatches.get(0);
-            order.trackingNumber = matched.trackingNumber;
-            if (!matched.shippingCompany.isEmpty()) {
-                order.shippingCompanyName = matched.shippingCompany;
+            if (trackingResolution.state == MatchState.NO_TRACKING) {
+                noTrackingCount++;
+                continue;
             }
-            order.selected = true;
-            matchedCount++;
+
+            unmatchedCount++;
         }
 
         return new MatchResult(
-                "구글시트 " + SHEET_NAME,
+                sourceName,
                 parsedSheet.sheetRowCount,
                 parsedSheet.trackingRowCount,
                 matchedCount,
                 noTrackingCount,
                 unmatchedCount,
                 candidateCount,
-                nameFallbackCount
+                nameFallbackCount,
+                pendingBlockedCount,
+                parsedSheet.pendingWindow.summaryLabel()
         );
+    }
+
+    private static void applyMatchedTracking(DispatchOrder order, SheetRow matchedRow, boolean selectForUpload) {
+        order.trackingNumber = matchedRow.trackingNumber;
+        if (!matchedRow.shippingCompany.isEmpty()) {
+            order.shippingCompanyName = matchedRow.shippingCompany;
+        }
+        order.selected = selectForUpload;
+    }
+
+    private static Map<String, List<SheetRow>> buildPhoneIndex(List<SheetRow> rows, boolean pendingShipment) {
+        Map<String, List<SheetRow>> phoneIndex = new HashMap<>();
+        if (rows == null) {
+            return phoneIndex;
+        }
+        for (SheetRow row : rows) {
+            if (row.pendingShipment != pendingShipment || row.recipientPhone.isEmpty()) {
+                continue;
+            }
+            phoneIndex.computeIfAbsent(row.recipientPhone, key -> new ArrayList<>()).add(row);
+        }
+        return phoneIndex;
+    }
+
+    private static OrderMatchResolution resolveTrackingMatch(DispatchOrder order, Map<String, List<SheetRow>> phoneIndex) {
+        List<SheetRow> candidates = buildCandidates(order, phoneIndex);
+        if (candidates.isEmpty()) {
+            return OrderMatchResolution.unmatched();
+        }
+
+        List<SheetRow> marketMatches = findMarketMatches(order.marketName, candidates);
+        if (marketMatches.isEmpty()) {
+            return OrderMatchResolution.unmatched();
+        }
+
+        List<SheetRow> withTracking = new ArrayList<>();
+        for (SheetRow candidate : marketMatches) {
+            if (!candidate.trackingNumber.isEmpty()) {
+                withTracking.add(candidate);
+            }
+        }
+        if (withTracking.isEmpty()) {
+            List<SheetRow> nameMatches = findNameMatches(order.recipientName, marketMatches);
+            return nameMatches.size() == 1 ? OrderMatchResolution.noTracking() : OrderMatchResolution.candidate();
+        }
+
+        List<SheetRow> nameMatches = findNameMatches(order.recipientName, withTracking);
+        if (nameMatches.isEmpty()) {
+            return OrderMatchResolution.candidate();
+        }
+
+        SheetRow resolved = resolveSharedTrackingMatch(nameMatches);
+        return resolved == null ? OrderMatchResolution.candidate() : OrderMatchResolution.matched(resolved);
+    }
+
+    private static OrderMatchResolution resolvePendingMatch(DispatchOrder order, Map<String, List<SheetRow>> phoneIndex) {
+        List<SheetRow> candidates = buildCandidates(order, phoneIndex);
+        if (candidates.isEmpty()) {
+            return OrderMatchResolution.unmatched();
+        }
+
+        List<SheetRow> marketMatches = findMarketMatches(order.marketName, candidates);
+        if (marketMatches.isEmpty()) {
+            return OrderMatchResolution.unmatched();
+        }
+
+        List<SheetRow> nameMatches = findNameMatches(order.recipientName, marketMatches);
+        return nameMatches.size() == 1 ? OrderMatchResolution.pendingNoTracking(nameMatches.get(0)) : OrderMatchResolution.candidate();
+    }
+
+    private static List<SheetRow> buildCandidates(DispatchOrder order, Map<String, List<SheetRow>> phoneIndex) {
+        List<SheetRow> candidates = new ArrayList<>();
+        addCandidates(candidates, phoneIndex, order.recipientCellPhone);
+        addCandidates(candidates, phoneIndex, order.recipientPhone);
+        return dedupeCandidates(candidates);
+    }
+
+    private static SheetRow resolveSharedTrackingMatch(List<SheetRow> matches) {
+        if (matches == null || matches.isEmpty()) {
+            return null;
+        }
+
+        SheetRow first = matches.get(0);
+        String trackingNumber = first.trackingNumber;
+        if (trackingNumber.isEmpty()) {
+            return null;
+        }
+
+        for (int i = 1; i < matches.size(); i++) {
+            if (!trackingNumber.equals(matches.get(i).trackingNumber)) {
+                return null;
+            }
+        }
+        return first;
+    }
+
+    static ParsedSheet scopeParsedSheetToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
+        if (parsedSheet == null || parsedSheet.rows == null || parsedSheet.rows.isEmpty() || orders == null || orders.isEmpty()) {
+            return parsedSheet;
+        }
+
+        List<String> normalizedMarkets = collectNormalizedOrderMarkets(orders);
+        if (normalizedMarkets.isEmpty()) {
+            return parsedSheet;
+        }
+
+        List<SheetRow> scopedRows = new ArrayList<>();
+        int scopedTrackingRowCount = 0;
+        for (SheetRow row : parsedSheet.rows) {
+            if (!matchesAnyMarket(row.vendorName, normalizedMarkets)) {
+                continue;
+            }
+            scopedRows.add(row);
+            if (!row.trackingNumber.isEmpty()) {
+                scopedTrackingRowCount++;
+            }
+        }
+
+        return new ParsedSheet(scopedRows.size(), scopedTrackingRowCount, scopedRows, parsedSheet.pendingWindow);
+    }
+
+    private static String buildMatchSourceName(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
+        String label = buildOrderScopeLabel(orders);
+        String configuredSheetName = cleanValue(SHEET_NAME);
+        if (configuredSheetName.isEmpty()) {
+            configuredSheetName = LIVE_TRACKING_SHEET_NAME;
+        }
+        if (label.isEmpty()) {
+            return "구글시트 " + configuredSheetName;
+        }
+        return "구글시트 " + configuredSheetName + " / " + label;
+    }
+
+    private static String buildLiveMatchSourceName(List<DispatchOrder> orders) {
+        String label = buildOrderScopeLabel(orders);
+        String baseLabel = "구글시트 " + LIVE_TRACKING_SHEET_NAME + " + " + LIVE_PENDING_SHEET_NAME;
+        if (label.isEmpty()) {
+            return baseLabel;
+        }
+        return baseLabel + " / " + label;
+    }
+
+    private static String buildOrderScopeLabel(List<DispatchOrder> orders) {
+        List<String> marketNames = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        if (orders == null) {
+            return "";
+        }
+        for (DispatchOrder order : orders) {
+            if (order == null) {
+                continue;
+            }
+            String displayName = cleanValue(order.marketName);
+            String normalized = normalizeMarketName(displayName);
+            if (displayName.isEmpty() || normalized.isEmpty() || !seen.add(normalized)) {
+                continue;
+            }
+            marketNames.add(displayName);
+        }
+        if (marketNames.isEmpty()) {
+            return "";
+        }
+        if (marketNames.size() == 1) {
+            return marketNames.get(0);
+        }
+        return "판매처 " + marketNames.size() + "개";
+    }
+
+    private static List<String> collectNormalizedOrderMarkets(List<DispatchOrder> orders) {
+        List<String> normalizedMarkets = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        if (orders == null) {
+            return normalizedMarkets;
+        }
+        for (DispatchOrder order : orders) {
+            if (order == null) {
+                continue;
+            }
+            String normalized = normalizeMarketName(order.marketName);
+            if (normalized.isEmpty() || !seen.add(normalized)) {
+                continue;
+            }
+            normalizedMarkets.add(normalized);
+        }
+        return normalizedMarkets;
+    }
+
+    private static boolean matchesAnyMarket(String vendorName, List<String> normalizedMarkets) {
+        if (normalizedMarkets == null || normalizedMarkets.isEmpty()) {
+            return true;
+        }
+        String normalizedVendor = normalizeMarketName(vendorName);
+        if (normalizedVendor.isEmpty()) {
+            return false;
+        }
+        for (String normalizedMarket : normalizedMarkets) {
+            if (normalizedMarket.isEmpty()) {
+                continue;
+            }
+            if (normalizedVendor.contains(normalizedMarket) || normalizedMarket.contains(normalizedVendor)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void addCandidates(List<SheetRow> target, Map<String, List<SheetRow>> phoneIndex, String phone) {
@@ -256,6 +507,50 @@ public final class GoogleSheetsTrackingMatcher {
         return matches;
     }
 
+    private static PendingWindow detectPendingWindow(List<List<String>> rows, int headerRowIndex) {
+        List<DateMarker> dateMarkers = new ArrayList<>();
+
+        for (int rowIndex = headerRowIndex + 1; rowIndex < rows.size(); rowIndex++) {
+            String dateMarker = extractDateMarker(rows.get(rowIndex));
+            if (dateMarker.isEmpty()) {
+                continue;
+            }
+            dateMarkers.add(new DateMarker(rowIndex, dateMarker));
+        }
+
+        if (dateMarkers.size() < 2) {
+            return PendingWindow.NONE;
+        }
+
+        String latestDate = dateMarkers.get(dateMarkers.size() - 1).date;
+        String previousDate = "";
+        for (int i = dateMarkers.size() - 2; i >= 0; i--) {
+            String candidate = dateMarkers.get(i).date;
+            if (!latestDate.equals(candidate)) {
+                previousDate = candidate;
+                break;
+            }
+        }
+
+        if (previousDate.isEmpty()) {
+            return PendingWindow.NONE;
+        }
+
+        return new PendingWindow(previousDate, latestDate, dateMarkers);
+    }
+
+    static String extractDateMarker(List<String> row) {
+        return isDateMarker(getCell(row, 0)) ? cleanValue(getCell(row, 0)) : "";
+    }
+
+    static boolean isDateMarker(String value) {
+        return DATE_MARKER_PATTERN.matcher(cleanValue(value)).matches();
+    }
+
+    static boolean isRowInLatestPendingWindow(List<List<String>> rows, int headerRowIndex, int rowIndex) {
+        return detectPendingWindow(rows, headerRowIndex).contains(rowIndex);
+    }
+
     private static int detectHeaderRow(List<List<String>> rows) {
         int headerRowIndex = 0;
         int maxKeywordHits = -1;
@@ -320,7 +615,7 @@ public final class GoogleSheetsTrackingMatcher {
     }
 
     private static void ensureConfigured() {
-        if (SPREADSHEET_ID == null || SPREADSHEET_ID.trim().isEmpty() || SHEET_NAME == null || SHEET_NAME.trim().isEmpty()) {
+        if (SPREADSHEET_ID == null || SPREADSHEET_ID.trim().isEmpty()) {
             throw new IllegalArgumentException("구글시트 설정이 비어 있습니다.");
         }
         if (CLIENT_ID == null || CLIENT_ID.trim().isEmpty()
@@ -518,11 +813,17 @@ public final class GoogleSheetsTrackingMatcher {
         final int sheetRowCount;
         final int trackingRowCount;
         final List<SheetRow> rows;
+        final PendingWindow pendingWindow;
 
         ParsedSheet(int sheetRowCount, int trackingRowCount, List<SheetRow> rows) {
+            this(sheetRowCount, trackingRowCount, rows, PendingWindow.NONE);
+        }
+
+        ParsedSheet(int sheetRowCount, int trackingRowCount, List<SheetRow> rows, PendingWindow pendingWindow) {
             this.sheetRowCount = sheetRowCount;
             this.trackingRowCount = trackingRowCount;
             this.rows = rows;
+            this.pendingWindow = pendingWindow == null ? PendingWindow.NONE : pendingWindow;
         }
     }
 
@@ -534,9 +835,15 @@ public final class GoogleSheetsTrackingMatcher {
         final String recipientPhone;
         final String recipientName;
         final String shippingCompany;
+        final boolean pendingShipment;
 
         SheetRow(int rowIndex, String sourceRowKey, String vendorName, String trackingNumber,
                  String recipientPhone, String recipientName, String shippingCompany) {
+            this(rowIndex, sourceRowKey, vendorName, trackingNumber, recipientPhone, recipientName, shippingCompany, false);
+        }
+
+        SheetRow(int rowIndex, String sourceRowKey, String vendorName, String trackingNumber,
+                 String recipientPhone, String recipientName, String shippingCompany, boolean pendingShipment) {
             this.rowIndex = rowIndex;
             this.sourceRowKey = sourceRowKey;
             this.vendorName = vendorName;
@@ -544,6 +851,99 @@ public final class GoogleSheetsTrackingMatcher {
             this.recipientPhone = recipientPhone;
             this.recipientName = recipientName;
             this.shippingCompany = shippingCompany == null ? "" : shippingCompany.trim();
+            this.pendingShipment = pendingShipment;
+        }
+    }
+
+    private static final class PendingWindow {
+        static final PendingWindow NONE = new PendingWindow("", "", Collections.emptyList());
+
+        final String previousDate;
+        final String latestDate;
+        final List<DateMarker> dateMarkers;
+
+        PendingWindow(String previousDate, String latestDate, List<DateMarker> dateMarkers) {
+            this.previousDate = cleanValue(previousDate);
+            this.latestDate = cleanValue(latestDate);
+            this.dateMarkers = dateMarkers == null ? Collections.emptyList() : dateMarkers;
+        }
+
+        boolean contains(int rowIndex) {
+            if (previousDate.isEmpty()) {
+                return false;
+            }
+            for (DateMarker marker : dateMarkers) {
+                if (marker.rowIndex == rowIndex) {
+                    return false;
+                }
+            }
+            return previousDate.equals(activeDateForRow(rowIndex));
+        }
+
+        private String activeDateForRow(int rowIndex) {
+            String activeDate = "";
+            for (DateMarker marker : dateMarkers) {
+                if (marker.rowIndex >= rowIndex) {
+                    break;
+                }
+                activeDate = marker.date;
+            }
+            return activeDate;
+        }
+
+        String summaryLabel() {
+            if (previousDate.isEmpty() || latestDate.isEmpty()) {
+                return "";
+            }
+            return previousDate + " ~ " + latestDate;
+        }
+    }
+
+    private enum MatchState {
+        MATCHED,
+        PENDING_NO_TRACKING,
+        NO_TRACKING,
+        UNMATCHED,
+        CANDIDATE
+    }
+
+    private static final class OrderMatchResolution {
+        final MatchState state;
+        final SheetRow matchedRow;
+
+        private OrderMatchResolution(MatchState state, SheetRow matchedRow) {
+            this.state = state;
+            this.matchedRow = matchedRow;
+        }
+
+        static OrderMatchResolution matched(SheetRow row) {
+            return new OrderMatchResolution(MatchState.MATCHED, row);
+        }
+
+        static OrderMatchResolution pendingNoTracking(SheetRow row) {
+            return new OrderMatchResolution(MatchState.PENDING_NO_TRACKING, row);
+        }
+
+        static OrderMatchResolution noTracking() {
+            return new OrderMatchResolution(MatchState.NO_TRACKING, null);
+        }
+
+        static OrderMatchResolution unmatched() {
+            return new OrderMatchResolution(MatchState.UNMATCHED, null);
+        }
+
+        static OrderMatchResolution candidate() {
+            return new OrderMatchResolution(MatchState.CANDIDATE, null);
+        }
+    }
+
+    private static final class DateMarker {
+        final int rowIndex;
+        final String date;
+
+        DateMarker(int rowIndex, String date) {
+            this.rowIndex = rowIndex;
+            this.date = cleanValue(date);
         }
     }
 
@@ -570,9 +970,12 @@ public final class GoogleSheetsTrackingMatcher {
         public final int unmatchedCount;
         public final int candidateCount;
         public final int nameFallbackCount;
+        public final int pendingBlockedCount;
+        public final String pendingWindowLabel;
 
         MatchResult(String sourceName, int sheetRowCount, int trackingRowCount, int matchedCount,
-                    int noTrackingCount, int unmatchedCount, int candidateCount, int nameFallbackCount) {
+                    int noTrackingCount, int unmatchedCount, int candidateCount, int nameFallbackCount,
+                    int pendingBlockedCount, String pendingWindowLabel) {
             this.sourceName = sourceName;
             this.sheetRowCount = sheetRowCount;
             this.trackingRowCount = trackingRowCount;
@@ -581,6 +984,8 @@ public final class GoogleSheetsTrackingMatcher {
             this.unmatchedCount = unmatchedCount;
             this.candidateCount = candidateCount;
             this.nameFallbackCount = nameFallbackCount;
+            this.pendingBlockedCount = pendingBlockedCount;
+            this.pendingWindowLabel = cleanValue(pendingWindowLabel);
         }
 
         public String summary() {
@@ -591,6 +996,12 @@ public final class GoogleSheetsTrackingMatcher {
                     .append("개, 매칭 ")
                     .append(matchedCount)
                     .append("건");
+            if (pendingBlockedCount > 0) {
+                builder.append(", 미출고확인 ").append(pendingBlockedCount).append("건");
+                if (!pendingWindowLabel.isEmpty()) {
+                    builder.append(" (").append(pendingWindowLabel).append(")");
+                }
+            }
             if (nameFallbackCount > 0) {
                 builder.append(", 이름폴백 ").append(nameFallbackCount).append("건");
             }
@@ -607,3 +1018,5 @@ public final class GoogleSheetsTrackingMatcher {
         }
     }
 }
+
+

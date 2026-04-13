@@ -15,7 +15,7 @@ public class GoogleSheetsTrackingMatcherTest {
     public void parseRowsFromSheetsResponse_readsBatchGetPayload() throws Exception {
         String response = "{"
                 + "\"spreadsheetId\":\"sheet-id\"," 
-                + "\"valueRanges\":[{"
+                + "\"valueRanges\":[{" 
                 + "\"range\":\"'출고정보'!A1:M3\"," 
                 + "\"majorDimension\":\"ROWS\"," 
                 + "\"values\":["
@@ -127,5 +127,307 @@ public class GoogleSheetsTrackingMatcherTest {
         assertEquals(1, result.matchedCount);
         assertEquals(1, result.candidateCount);
         assertEquals(1, result.unmatchedCount);
+    }
+
+    @Test
+    public void latestPendingWindow_usesLatestDistinctDateBoundary() {
+        List<List<String>> rows = Arrays.asList(
+                Arrays.asList("상품명", "상품코드", "발주사"),
+                Arrays.asList("2026.04.07", "마감"),
+                Arrays.asList("상품A", "CODE-A", "가게A"),
+                Arrays.asList("2026.04.08", "1차"),
+                Arrays.asList("상품B", "CODE-B", "가게A"),
+                Arrays.asList("상품C", "CODE-C", "가게B"),
+                Arrays.asList("2026.04.08", "긴급 2")
+        );
+
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 1));
+        assertTrue(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 2));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 3));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 4));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 5));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 6));
+    }
+
+    @Test
+    public void applyRowsToOrders_blocksPendingShipmentMatches() {
+        DispatchOrder order = new DispatchOrder(
+                "가게A / Cafe24",
+                "cafe24_home",
+                "가게A",
+                "ORDER-1",
+                "ITEM-1",
+                "",
+                "INSTRUCT",
+                "홍길동",
+                "상품A",
+                1,
+                "2026-04-08",
+                "1000원",
+                "010-1234-5678",
+                ""
+        );
+
+        GoogleSheetsTrackingMatcher.SheetRow pendingRow = new GoogleSheetsTrackingMatcher.SheetRow(
+                10,
+                "가게A|01012345678|TRACK-PENDING|10",
+                "가게A",
+                "TRACKPENDING",
+                "01012345678",
+                "홍길동",
+                "CJ대한통운",
+                true
+        );
+
+        GoogleSheetsTrackingMatcher.ParsedSheet parsedSheet = new GoogleSheetsTrackingMatcher.ParsedSheet(
+                12,
+                1,
+                Arrays.asList(pendingRow)
+        );
+
+        GoogleSheetsTrackingMatcher.MatchResult result = GoogleSheetsTrackingMatcher.applyRowsToOrders(
+                parsedSheet,
+                Arrays.asList(order)
+        );
+
+        assertEquals("", order.trackingNumber);
+        assertTrue(order.isUploadBlocked());
+        assertFalse(order.selected);
+        assertEquals(1, result.pendingBlockedCount);
+    }
+
+    @Test
+    public void latestPendingWindow_keepsAllRepeatedPreviousDateSectionsPending() {
+        List<List<String>> rows = Arrays.asList(
+                Arrays.asList("상품명", "상품코드", "발주사"),
+                Arrays.asList("2026.04.08", "1차"),
+                Arrays.asList("상품A", "CODE-A", "가게A"),
+                Arrays.asList("2026.04.08", "2차"),
+                Arrays.asList("상품B", "CODE-B", "가게A"),
+                Arrays.asList("2026.04.09", "오늘 1차"),
+                Arrays.asList("상품C", "CODE-C", "가게A"),
+                Arrays.asList("2026.04.09", "오늘 2차"),
+                Arrays.asList("상품D", "CODE-D", "가게A")
+        );
+
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 1));
+        assertTrue(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 2));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 3));
+        assertTrue(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 4));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 5));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 6));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 7));
+        assertFalse(GoogleSheetsTrackingMatcher.isRowInLatestPendingWindow(rows, 0, 8));
+    }
+
+    @Test
+    public void applyRowsToOrders_blocksPendingShipmentWithoutTrackingAndClearsStaleTracking() {
+        DispatchOrder order = new DispatchOrder(
+                "가게A / Cafe24",
+                "cafe24_home",
+                "가게A",
+                "ORDER-1",
+                "ITEM-1",
+                "",
+                "INSTRUCT",
+                "홍길동",
+                "상품A",
+                1,
+                "2026-04-08",
+                "1000원",
+                "010-1234-5678",
+                ""
+        );
+        order.trackingNumber = "OLDTRACK";
+        order.selected = true;
+
+        GoogleSheetsTrackingMatcher.SheetRow pendingRow = new GoogleSheetsTrackingMatcher.SheetRow(
+                10,
+                "가게A|01012345678||10",
+                "가게A",
+                "",
+                "01012345678",
+                "홍길동",
+                "CJ대한통운",
+                true
+        );
+
+        GoogleSheetsTrackingMatcher.ParsedSheet parsedSheet = new GoogleSheetsTrackingMatcher.ParsedSheet(
+                12,
+                0,
+                Arrays.asList(pendingRow)
+        );
+
+        GoogleSheetsTrackingMatcher.MatchResult result = GoogleSheetsTrackingMatcher.applyRowsToOrders(
+                parsedSheet,
+                Arrays.asList(order)
+        );
+
+        assertEquals("", order.trackingNumber);
+        assertTrue(order.isUploadBlocked());
+        assertFalse(order.selected);
+        assertEquals(1, result.pendingBlockedCount);
+        assertEquals(0, result.noTrackingCount);
+    }
+
+    @Test
+    public void applyRowsToOrders_clearsStaleTrackingWhenNoCandidateMatches() {
+        DispatchOrder order = new DispatchOrder(
+                "가게A / Cafe24",
+                "cafe24_home",
+                "가게A",
+                "ORDER-1",
+                "ITEM-1",
+                "",
+                "INSTRUCT",
+                "홍길동",
+                "상품A",
+                1,
+                "2026-04-08",
+                "1000원",
+                "010-1234-5678",
+                ""
+        );
+        order.trackingNumber = "OLDTRACK";
+        order.selected = true;
+
+        GoogleSheetsTrackingMatcher.ParsedSheet parsedSheet = new GoogleSheetsTrackingMatcher.ParsedSheet(
+                3,
+                1,
+                Arrays.asList(
+                        new GoogleSheetsTrackingMatcher.SheetRow(
+                                1,
+                                "가게A|01099998888|TRACK-ONE|1",
+                                "가게A",
+                                "TRACKONE",
+                                "01099998888",
+                                "홍길동",
+                                "CJ대한통운"
+                        )
+                )
+        );
+
+        GoogleSheetsTrackingMatcher.MatchResult result = GoogleSheetsTrackingMatcher.applyRowsToOrders(
+                parsedSheet,
+                Arrays.asList(order)
+        );
+
+        assertEquals("", order.trackingNumber);
+        assertFalse(order.selected);
+        assertFalse(order.isUploadBlocked());
+        assertEquals(1, result.unmatchedCount);
+    }
+
+    @Test
+    public void applyRowsToOrders_matchesWhenDuplicateRowsShareOneTrackingNumber() {
+        DispatchOrder order = new DispatchOrder(
+                "홈런마켓 / Cafe24",
+                "home",
+                "홈런마켓",
+                "ORDER-1",
+                "ITEM-1",
+                "",
+                "INSTRUCT",
+                "홍길동",
+                "상품A",
+                1,
+                "2026-04-10",
+                "1000원",
+                "010-1234-5678",
+                ""
+        );
+
+        GoogleSheetsTrackingMatcher.ParsedSheet parsedSheet = new GoogleSheetsTrackingMatcher.ParsedSheet(
+                4,
+                2,
+                Arrays.asList(
+                        new GoogleSheetsTrackingMatcher.SheetRow(
+                                1,
+                                "홈런마켓|01012345678|TRACKHOME|1",
+                                "홈런마켓",
+                                "TRACKHOME",
+                                "01012345678",
+                                "홍길동",
+                                "CJ대한통운"
+                        ),
+                        new GoogleSheetsTrackingMatcher.SheetRow(
+                                2,
+                                "홈런마켓|01012345678|TRACKHOME|2",
+                                "홈런마켓",
+                                "TRACKHOME",
+                                "01012345678",
+                                "홍길동",
+                                "CJ대한통운"
+                        )
+                )
+        );
+
+        GoogleSheetsTrackingMatcher.MatchResult result = GoogleSheetsTrackingMatcher.applyRowsToOrders(
+                parsedSheet,
+                Arrays.asList(order)
+        );
+
+        assertEquals("TRACKHOME", order.trackingNumber);
+        assertTrue(order.selected);
+        assertEquals(1, result.matchedCount);
+        assertEquals(0, result.candidateCount);
+    }
+
+    @Test
+    public void scopeParsedSheetToOrders_limitsSummaryRowsToSelectedMarket() {
+        DispatchOrder homeOrder = new DispatchOrder(
+                "홈런마켓 / Cafe24",
+                "home",
+                "홈런마켓",
+                "ORDER-1",
+                "ITEM-1",
+                "",
+                "INSTRUCT",
+                "홍길동",
+                "상품A",
+                1,
+                "2026-04-10",
+                "1000원",
+                "010-1234-5678",
+                ""
+        );
+
+        GoogleSheetsTrackingMatcher.ParsedSheet parsedSheet = new GoogleSheetsTrackingMatcher.ParsedSheet(
+                4,
+                2,
+                Arrays.asList(
+                        new GoogleSheetsTrackingMatcher.SheetRow(
+                                1,
+                                "홈런마켓|01012345678|TRACKHOME|1",
+                                "홈런마켓",
+                                "TRACKHOME",
+                                "01012345678",
+                                "홍길동",
+                                "CJ대한통운"
+                        ),
+                        new GoogleSheetsTrackingMatcher.SheetRow(
+                                2,
+                                "준비몰|01099998888|TRACKPREP|2",
+                                "준비몰",
+                                "TRACKPREP",
+                                "01099998888",
+                                "김영희",
+                                "CJ대한통운"
+                        )
+                )
+        );
+
+        GoogleSheetsTrackingMatcher.ParsedSheet scopedSheet = GoogleSheetsTrackingMatcher.scopeParsedSheetToOrders(
+                parsedSheet,
+                Arrays.asList(homeOrder)
+        );
+        GoogleSheetsTrackingMatcher.MatchResult result = GoogleSheetsTrackingMatcher.applyRowsToOrders(
+                scopedSheet,
+                Arrays.asList(homeOrder)
+        );
+
+        assertEquals(1, scopedSheet.sheetRowCount);
+        assertEquals(1, scopedSheet.trackingRowCount);
+        assertEquals("구글시트 출고정보 / 홈런마켓 · 송장행 1개, 매칭 1건", result.summary());
     }
 }

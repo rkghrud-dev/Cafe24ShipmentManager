@@ -5,14 +5,14 @@
     <string name="mode_mock">준비중</string>
     <string name="mode_local_keys">로컬키</string>
     <string name="mode_live">실시간</string>
-    <string name="hero_subtitle_empty">테스트 키 또는 사용자 JSON을 연결하세요.</string>
+    <string name="hero_subtitle_empty">기본 판매처를 확인한 뒤 각 Cafe24 JSON을 연결하세요.</string>
     <string name="hero_subtitle_connected">저장된 판매처 %1$d개. 새로고침으로 바로 조회합니다.</string>
     <string name="import_home_success">홈런마켓 Cafe24 키를 저장했습니다.</string>
     <string name="import_prepare_success">준비몰 Cafe24 키를 저장했습니다.</string>
     <string name="import_failed_prefix">가져오기에 실패했습니다. </string>
-    <string name="debug_seed_missing">debug 자산에서 불러올 테스트 키를 찾지 못했습니다.</string>
-    <string name="debug_seed_loaded">테스트 키 %1$d개를 저장했습니다.</string>
-    <string name="saved_keys_cleared">저장된 키를 모두 삭제했습니다.</string>
+    <string name="default_cafe24_markets_ready">기본 판매처가 이미 준비되어 있습니다.</string>
+    <string name="default_cafe24_markets_restored">기본 판매처 %1$d개를 복원했습니다. 이제 각 JSON을 연결하세요.</string>
+    <string name="saved_keys_cleared">저장된 키를 모두 삭제하고 기본 판매처를 다시 만들었습니다.</string>
     <string name="coupang_dialog_title">쿠팡 인증 키 저장</string>
     <string name="coupang_dialog_message">테스트 단계에서는 기기 내부 저장소에 저장하고, 이후에는 가져오기 흐름으로 통일할 수 있습니다.</string>
     <string name="save_label">저장</string>
@@ -29,5 +29,8 @@
     <string name="source_coupang_short">쿠팡</string>
     <string name="pending_badge_format">! %1$d</string>
     <string name="settings_title">설정</string>
-    <string name="settings_summary_empty">연결된 판매처가 없습니다. 설정에서 판매처 키를 추가해 주세요.</string>
+    <string name="settings_summary_empty">연결된 판매처가 없습니다. 기본 판매처를 복원한 뒤 각 Cafe24 JSON을 연결하세요.</string>
+    <string name="settings_restore_default_markets">기본 판매처</string>
+    <string name="debug_seed_missing">불러올 디버그 시드가 없습니다.</string>
+    <string name="debug_seed_loaded">디버그 시드 %1$d개를 불러왔습니다.</string>
 </resources>
