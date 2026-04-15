@@ -147,6 +147,7 @@ public partial class DatabaseManager
             );
         ");
 
+        InitializeShipmentRequestExportTables(conn);
         InitializeAuthTables(conn);
         EnsureSchemaUpgrades(conn);
     }

@@ -94,6 +94,7 @@ public partial class MainForm
         };
 
         EnsureOrderExportPopupMenuEx();
+        EnsureOrderExportHistoryUi();
         UpdateOrderSelectionSummaryEx();
     }
 
@@ -426,12 +427,25 @@ public partial class MainForm
             return;
         }
 
+        string? historyError = null;
+        try
+        {
+            SaveOrderExportHistoryEx(rows, "clipboard");
+        }
+        catch (Exception ex)
+        {
+            historyError = ex.Message;
+            _log.Error("출고용 클립보드 이력 저장 실패", ex);
+        }
+
         MarkCheckedPreviewOrdersAsCopiedEx();
 
         var missingCount = rows.Count(row => string.IsNullOrWhiteSpace(row.ProductCode));
         var message = $"클립보드에 {rows.Count}건을 복사했습니다.\n구글 시트의 상품코드 셀부터 바로 붙여넣으면 됩니다.";
         if (missingCount > 0)
             message += $"\n공급사 상품명 빈칸 {missingCount}건은 맨 위로 올려뒀습니다.";
+        if (!string.IsNullOrWhiteSpace(historyError))
+            message += $"\n출고용 이력 저장 실패: {historyError}";
 
         MessageBox.Show(this, message, "복사 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -456,9 +470,65 @@ public partial class MainForm
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         ShipmentRequestOrderExportFormatterEx.SaveAsWorkbook(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx, dialog.FileName);
-        MessageBox.Show(this, $"출고용 엑셀 파일을 저장했습니다.\n{dialog.FileName}", "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+        string? historyError = null;
+        try
+        {
+            var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
+            SaveOrderExportHistoryEx(rows, "workbook", dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            historyError = ex.Message;
+            _log.Error("출고용 엑셀 저장 이력 기록 실패", ex);
+        }
+
+        var message = $"출고용 엑셀 파일을 저장했습니다.\n{dialog.FileName}";
+        if (!string.IsNullOrWhiteSpace(historyError))
+            message += $"\n출고용 이력 저장 실패: {historyError}";
+
+        MessageBox.Show(this, message, "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    private void SaveOrderExportHistoryEx(IReadOnlyList<ShipmentRequestOrderRowEx> rows, string savedFrom, string? filePath = null)
+    {
+        if (rows.Count == 0)
+            return;
+
+        var batch = new ShipmentRequestExportBatch
+        {
+            AppUserId = _currentUser.Id,
+            UserName = _currentUser.EffectiveDisplayName,
+            SavedFrom = savedFrom,
+            MarketName = CurrentOrderExportMarketNameEx,
+            ExportDate = CurrentOrderExportDateTextEx,
+            RowCount = rows.Count,
+            MissingProductCodeCount = rows.Count(row => string.IsNullOrWhiteSpace(row.ProductCode)),
+            FilePath = filePath ?? string.Empty,
+            CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+        };
+
+        var historyRows = rows
+            .Select((row, index) => new ShipmentRequestExportRow
+            {
+                RowNumber = index + 1,
+                ProductCode = row.ProductCode,
+                MarketName = row.MarketName,
+                ExportDate = row.ExportDate,
+                Quantity = row.Quantity,
+                RecipientName = row.RecipientName,
+                RecipientPhone = row.RecipientPhone,
+                PostalCode = row.PostalCode,
+                FullAddress = row.FullAddress,
+                ShippingMessage = row.ShippingMessage,
+                DetailAddress = row.DetailAddress
+            })
+            .ToList();
+
+        var batchId = _db.InsertShipmentRequestExportBatch(batch, historyRows);
+        _log.Info($"출고용 이력 저장: {batchId} / {savedFrom} / {rows.Count}건");
+        RefreshOrderExportHistoryBatchesEx(batchId);
+    }
     private string CurrentOrderExportMarketNameEx => string.IsNullOrWhiteSpace(_cboOrderExportMarketEx?.Text)
         ? ShipmentRequestOrderExportFormatterEx.DefaultMarketName
         : _cboOrderExportMarketEx.Text.Trim();
@@ -499,7 +569,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
         "수령인 상세 주소"
     };
 
-    private static readonly Regex OptionLetterRegex = new("=\\s*([A-Za-z])", RegexOptions.Compiled);
+    private const string DefaultOptionLetter = "A";
+    private static readonly Regex AssignedOptionLetterRegex = new("=\\s*([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
+    private static readonly Regex StandaloneOptionLetterRegex = new("(?<![A-Za-z])([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
     private static readonly Regex ProductCodeRegex = new("\\b([A-Z]{2,}\\d+[A-Z])\\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static DateTime ResolveDefaultDate(IEnumerable<Cafe24Order> orders)
@@ -799,9 +871,15 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private static string? ExtractOptionLetter(string optionText)
     {
-        if (string.IsNullOrWhiteSpace(optionText)) return null;
-        var match = OptionLetterRegex.Match(optionText);
-        return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+        if (string.IsNullOrWhiteSpace(optionText))
+            return DefaultOptionLetter;
+
+        var assignedMatch = AssignedOptionLetterRegex.Match(optionText);
+        if (assignedMatch.Success)
+            return assignedMatch.Groups[1].Value.ToUpperInvariant();
+
+        var standaloneMatch = StandaloneOptionLetterRegex.Match(optionText);
+        return standaloneMatch.Success ? standaloneMatch.Groups[1].Value.ToUpperInvariant() : null;
     }
 
     private static string ResolveRecipientPhone(JObject? receiver, Cafe24Order order)
@@ -871,10 +949,5 @@ internal static class ShipmentRequestOrderExportFormatterEx
             .Trim();
     }
 }
-
-
-
-
-
 
 
