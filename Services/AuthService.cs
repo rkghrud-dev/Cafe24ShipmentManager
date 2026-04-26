@@ -150,6 +150,27 @@ public sealed class AuthService
         return (true, user, "");
     }
 
+    public void Logout(AppUser? user)
+    {
+        var preferences = _db.GetLoginPreferences();
+        var targetUserName = user?.UserName ?? preferences.LastUserName;
+
+        if (user != null)
+            _db.ClearUserRememberToken(user.Id);
+
+        if (string.IsNullOrWhiteSpace(preferences.LastUserName) ||
+            user == null ||
+            string.Equals(preferences.LastUserName, user.UserName, StringComparison.OrdinalIgnoreCase))
+        {
+            preferences.AutoLogin = false;
+            preferences.ProtectedRememberToken = "";
+            preferences.UpdatedAt = Now();
+            _db.SaveLoginPreferences(preferences);
+        }
+
+        _log.Info($"로그아웃: {targetUserName}");
+    }
+
     private void EnsureDefaultAdminUser()
     {
         if (_db.GetUserCount() > 0)

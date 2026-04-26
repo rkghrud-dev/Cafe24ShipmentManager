@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Cafe24ShipmentManager-Setup</AssemblyName>
+    <RootNamespace>Cafe24ShipmentManager.Setup</RootNamespace>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Payload\Cafe24ShipmentManager.zip" LogicalName="Payload.Cafe24ShipmentManager.zip" />
+    <EmbeddedResource Include="Payload\Cafe24Auth.zip" LogicalName="Payload.Cafe24Auth.zip" />
+  </ItemGroup>
+</Project>

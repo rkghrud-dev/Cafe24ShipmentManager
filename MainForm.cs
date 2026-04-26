@@ -1,4 +1,5 @@
 using System.Text;
+using System.Reflection;
 using Cafe24ShipmentManager.Data;
 using Cafe24ShipmentManager.Models;
 using Cafe24ShipmentManager.Services;
@@ -9,22 +10,31 @@ namespace Cafe24ShipmentManager;
 
 public partial class MainForm : Form
 {
+    private static readonly string AppVersion =
+        typeof(MainForm).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(MainForm).Assembly.GetName().Version?.ToString()
+        ?? "local";
+
     // ── Services ──
     private readonly DatabaseManager _db;
     private readonly AppLogger _log;
+    private readonly AuthService _authService;
     private readonly IReadOnlyList<IMarketplaceApiClient> _marketClients;
     private readonly Dictionary<string, IMarketplaceApiClient> _apiBySourceKey;
     private readonly MatchingEngine _matcher;
-    private readonly IMarketplaceApiClient _primaryMarketClient;
+    private readonly IMarketplaceApiClient? _primaryMarketClient;
     private GoogleSheetsReader? _sheetsReader;
     private readonly string _credentialPath;
     private readonly string _spreadsheetId;
     private readonly string _defaultSheetName;
     private readonly AppUser _currentUser;
     private readonly UserSettingsService _userSettingsService;
+    private readonly Cafe24TokenRefreshService _tokenRefreshService;
+    private bool _tokenWarningShown;
     private const string StockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
     private const int StockDefaultSheetGid = 2073400281;
     private const string PendingShipmentSheetName = "미출고 정보";
+    private const string PreferredShipmentSheetName = "cj발주서";
     private string _pendingShipmentWindowLabel = "";
 
     // ── State ──
@@ -38,6 +48,7 @@ public partial class MainForm : Form
     private ComboBox cboSheet = null!;
     private Label lblStatus = null!;
     private Button btnUserSettings = null!;
+    private Button btnLogout = null!;
 
     // ── 출고 탭 컨트롤 ──
     private CheckedListBox clbVendors = null!;
@@ -46,6 +57,9 @@ public partial class MainForm : Form
     private DateTimePicker dtpStart = null!;
     private DateTimePicker dtpEnd = null!;
     private Button btnFetch = null!;
+    private Button btnOrderStatusFilter = null!;
+    private ContextMenuStrip? _orderStatusFilterMenu;
+    private CheckedListBox? _clbOrderStatusFilter;
     private ComboBox cboShippingCompany = null!;
 
     // ── Main Tabs ──
@@ -54,9 +68,14 @@ public partial class MainForm : Form
     private TabPage tabPopular = null!;
     private TabPage tabProduct = null!;
     private TabPage tabStock = null!;
+    private TabPage tabToken = null!;
     private ComboBox cboStockSheet = null!;
     private Button btnStockLoad = null!;
     private DataGridView dgvStock = null!;
+    private DataGridView dgvTokens = null!;
+    private Button btnTokenRefresh = null!;
+    private Button btnTokenReload = null!;
+    private Button btnTokenReauth = null!;
 
     // ── 출고 탭 내부 서브탭 ──
     private TabControl tabShipSub = null!;
@@ -64,26 +83,29 @@ public partial class MainForm : Form
     private DataGridView dgvMatch = null!;
     private DataGridView dgvResult = null!;
     private Button btnMatch = null!;
+    private Button btnMatchSelectAll = null!;
+    private Button btnMatchDeselectAll = null!;
     private Button btnPush = null!;
     private Button btnDeliveryWaiting = null!;
     private Button btnExportFailed = null!;
+    private bool _matchConfirmDragActive;
+    private bool _matchConfirmDragValue;
+    private int _matchLastConfirmRowIndex = -1;
 
     // ── Log ──
     private TextBox txtLog = null!;
 
-    public MainForm(DatabaseManager db, AppLogger log, IReadOnlyList<IMarketplaceApiClient> marketClients,
+    public MainForm(DatabaseManager db, AppLogger log, AuthService authService, IReadOnlyList<IMarketplaceApiClient> marketClients,
                     string credentialPath, string spreadsheetId, string defaultSheetName, AppUser currentUser,
                     UserSettingsService userSettingsService)
     {
         _db = db;
         _log = log;
+        _authService = authService;
         _marketClients = marketClients
             .Where(client => !string.IsNullOrWhiteSpace(client.SourceKey))
             .ToList();
-        if (_marketClients.Count == 0)
-            throw new InvalidOperationException("유효한 마켓 API 설정이 없습니다.");
-
-        _primaryMarketClient = _marketClients[0];
+        _primaryMarketClient = _marketClients.FirstOrDefault();
         _apiBySourceKey = _marketClients.ToDictionary(client => client.SourceKey, StringComparer.OrdinalIgnoreCase);
         _matcher = new MatchingEngine(db, log);
         _credentialPath = credentialPath;
@@ -91,6 +113,7 @@ public partial class MainForm : Form
         _defaultSheetName = defaultSheetName;
         _currentUser = currentUser;
         _userSettingsService = userSettingsService;
+        _tokenRefreshService = new Cafe24TokenRefreshService(log);
 
         InitializeUI();
         WireEvents();
@@ -105,7 +128,8 @@ public partial class MainForm : Form
                 AppendLog(msg);
         };
 
-        _log.Info("프로그램 시작");
+        _log.Info($"프로그램 시작 v{AppVersion}");
+        LoadTokenStatuses(showWarning: true);
         _ = InitAsync();
     }
 
@@ -476,10 +500,14 @@ public partial class MainForm : Form
             foreach (var (title, _) in sheets)
                 cboSheet.Items.Add(title);
 
-            // 기본 시트 "출고정보" 선택
-            var defaultIdx = sheets.FindIndex(s => s.title == _defaultSheetName);
+            // 기본 시트 "cj발주서" 우선 선택
+            var defaultIdx = sheets.FindIndex(s => string.Equals(s.title, PreferredShipmentSheetName, StringComparison.OrdinalIgnoreCase));
+            if (defaultIdx < 0 && !string.IsNullOrWhiteSpace(_defaultSheetName))
+                defaultIdx = sheets.FindIndex(s => string.Equals(s.title, _defaultSheetName, StringComparison.OrdinalIgnoreCase));
             if (defaultIdx < 0)
-                defaultIdx = sheets.FindIndex(s => s.title.Contains("출고"));
+                defaultIdx = sheets.FindIndex(s => s.title.Contains(PreferredShipmentSheetName, StringComparison.OrdinalIgnoreCase));
+            if (defaultIdx < 0)
+                defaultIdx = sheets.FindIndex(s => s.title.Contains("출고", StringComparison.OrdinalIgnoreCase));
             cboSheet.SelectedIndex = defaultIdx >= 0 ? defaultIdx : 0;
 
             lblStatus.Text = $"✅ 연결 완료 ({sheets.Count}개 시트)";
@@ -533,7 +561,7 @@ public partial class MainForm : Form
     // ═══════════════════════════════════════
     private void InitializeUI()
     {
-        Text = $"마켓 출고/송장 관리 매니저 [{_currentUser.EffectiveDisplayName}]";
+        Text = $"마켓 출고/송장 관리 매니저 v{AppVersion} [{_currentUser.EffectiveDisplayName}]";
         Size = new Size(1400, 950);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("맑은 고딕", 9f);
@@ -543,15 +571,31 @@ public partial class MainForm : Form
         var lblSheet = new Label { Text = "시트:", Location = new Point(8, 9), AutoSize = true };
         cboSheet = new ComboBox { Location = new Point(42, 5), Width = 180, DropDownStyle = ComboBoxStyle.DropDownList };
         lblStatus = new Label { Text = "초기화 중...", Location = new Point(235, 9), AutoSize = true, ForeColor = Color.Gray };
+        var topButtonPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            Width = 220,
+            Height = 36,
+            Padding = new Padding(0, 4, 8, 0),
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
+        };
+        btnLogout = new Button
+        {
+            Text = "로그아웃",
+            Width = 90,
+            Height = 28
+        };
         btnUserSettings = new Button
         {
-            Text = "내 키 설정",
-            Location = new Point(1265, 4),
+            Text = "마켓 추가",
             Width = 100,
-            Height = 28,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
+            Height = 28
         };
-        topBar.Controls.AddRange(new Control[] { lblSheet, cboSheet, lblStatus, btnUserSettings });
+        topButtonPanel.Controls.Add(btnLogout);
+        topButtonPanel.Controls.Add(btnUserSettings);
+        topBar.Controls.Add(topButtonPanel);
+        topBar.Controls.AddRange(new Control[] { lblSheet, cboSheet, lblStatus });
 
         // ═══ 메인 탭 ═══
         tabMain = new TabControl { Dock = DockStyle.Fill };
@@ -560,13 +604,15 @@ public partial class MainForm : Form
         tabPopular = new TabPage("📊 발주 많은 상품");
         tabProduct = new TabPage("📋 상품정보");
         tabStock = new TabPage("🧮 재고관리");
+        tabToken = new TabPage("🔑 토큰 관리");
 
         BuildShipmentTab();
         BuildPlaceholderTab(tabPopular, "발주 많은 상품 분석 — 추후 구현 예정");
         BuildPlaceholderTab(tabProduct, "상품정보 관리 — 추후 구현 예정");
         BuildStockTab();
+        BuildTokenTab();
 
-        tabMain.TabPages.AddRange(new[] { tabShipment, tabPopular, tabProduct, tabStock });
+        tabMain.TabPages.AddRange(new[] { tabShipment, tabPopular, tabProduct, tabStock, tabToken });
 
         // ═══ 로그 ═══
         var logPanel = new Panel { Dock = DockStyle.Bottom, Height = 140 };
@@ -620,7 +666,7 @@ public partial class MainForm : Form
         dtpStart = new DateTimePicker
         {
             Location = new Point(75, 7), Width = 120, Format = DateTimePickerFormat.Short,
-            Value = DateTime.Now.AddDays(-_primaryMarketClient.DefaultOrderFetchDays)
+            Value = DateTime.Now.AddDays(-(_primaryMarketClient?.DefaultOrderFetchDays ?? 14))
         };
         var lblTo = new Label { Text = "~", Location = new Point(200, 11), AutoSize = true };
         dtpEnd = new DateTimePicker
@@ -629,11 +675,20 @@ public partial class MainForm : Form
             Value = DateTime.Now
         };
         btnFetch = new Button { Text = "📥 조회", Location = new Point(345, 5), Width = 80, Height = 30 };
-        var btnReset = new Button { Text = "🔄 초기화", Location = new Point(430, 5), Width = 80, Height = 30 };
+        btnOrderStatusFilter = new Button
+        {
+            Text = "배송준비중 ▼",
+            Location = new Point(430, 5),
+            Width = 110,
+            Height = 30
+        };
+        btnOrderStatusFilter.Click += (_, _) => ShowOrderStatusFilterMenu();
+        EnsureOrderStatusFilterMenu();
+        var btnReset = new Button { Text = "🔄 초기화", Location = new Point(545, 5), Width = 80, Height = 30 };
         btnReset.Click += (_, _) => ResetAll();
 
-        var lblShip = new Label { Text = "기본택배사:", Location = new Point(520, 11), AutoSize = true };
-        cboShippingCompany = new ComboBox { Location = new Point(600, 7), Width = 160, DropDownStyle = ComboBoxStyle.DropDownList };
+        var lblShip = new Label { Text = "기본택배사:", Location = new Point(635, 11), AutoSize = true };
+        cboShippingCompany = new ComboBox { Location = new Point(715, 7), Width = 160, DropDownStyle = ComboBoxStyle.DropDownList };
         foreach (var shippingCompany in new[] { "CJ대한통운", "한진택배", "롯데택배", "롯데글로벌로지스", "로젠택배", "우체국택배", "경동택배", "대신택배", "자체배송" })
             cboShippingCompany.Items.Add(shippingCompany);
         cboShippingCompany.SelectedItem = "CJ대한통운";
@@ -651,21 +706,34 @@ public partial class MainForm : Form
             FlowDirection = FlowDirection.LeftToRight
         };
         _sourceFilterBoxes.Clear();
-        foreach (var client in _marketClients)
+        if (_marketClients.Count == 0)
         {
-            var chk = new CheckBox
+            pnlSource.Controls.Add(new Label
             {
                 AutoSize = true,
-                Checked = true,
-                Text = ResolveSourceFilterLabel(client),
-                Tag = client.SourceKey,
-                Margin = new Padding(0, 3, 12, 0)
-            };
-            _sourceFilterBoxes[client.SourceKey] = chk;
-            pnlSource.Controls.Add(chk);
+                Text = "설정된 수집원 없음",
+                ForeColor = Color.Gray,
+                Margin = new Padding(0, 5, 12, 0)
+            });
+        }
+        else
+        {
+            foreach (var client in _marketClients)
+            {
+                var chk = new CheckBox
+                {
+                    AutoSize = true,
+                    Checked = true,
+                    Text = ResolveSourceFilterLabel(client),
+                    Tag = client.SourceKey,
+                    Margin = new Padding(0, 3, 12, 0)
+                };
+                _sourceFilterBoxes[client.SourceKey] = chk;
+                pnlSource.Controls.Add(chk);
+            }
         }
 
-        filterBar.Controls.AddRange(new Control[] { lblFrom, dtpStart, lblTo, dtpEnd, btnFetch, btnReset, lblShip, cboShippingCompany, lblSource, pnlSource });
+        filterBar.Controls.AddRange(new Control[] { lblFrom, dtpStart, lblTo, dtpEnd, btnFetch, btnOrderStatusFilter, btnReset, lblShip, cboShippingCompany, lblSource, pnlSource });
 
         // ── 서브탭: 데이터/매칭/결과 ──
         tabShipSub = new TabControl { Dock = DockStyle.Fill };
@@ -682,13 +750,16 @@ public partial class MainForm : Form
         // 서브탭2: 매칭/검토
         var subMatch = new TabPage("매칭/검토");
         dgvMatch = CreateGridView();
+        WireMatchGridCheckInteractions();
         var matchBtnPanel = new Panel { Dock = DockStyle.Top, Height = 36 };
-        btnPush = new Button { Text = "✅ 확정 항목 반영", Width = 150, Height = 30, Location = new Point(4, 3) };
-        var btnConfirmAll = new Button { Text = "전체 확정", Width = 90, Height = 30, Location = new Point(160, 3) };
-        btnDeliveryWaiting = new Button { Text = "배송 대기중", Width = 100, Height = 30, Location = new Point(256, 3) };
-        btnConfirmAll.Click += (_, _) => ConfirmAllMatches();
-        btnDeliveryWaiting.Click += (_, _) => MarkSelectedMatchesAsDeliveryWaiting();
-        matchBtnPanel.Controls.AddRange(new Control[] { btnPush, btnConfirmAll, btnDeliveryWaiting });
+        btnMatchSelectAll = new Button { Text = "전체선택", Width = 82, Height = 30, Location = new Point(4, 3) };
+        btnMatchDeselectAll = new Button { Text = "전체해제", Width = 82, Height = 30, Location = new Point(90, 3) };
+        btnDeliveryWaiting = new Button { Text = "배송대기", Width = 90, Height = 30, Location = new Point(176, 3) };
+        btnPush = new Button { Text = "배송중", Width = 90, Height = 30, Location = new Point(270, 3) };
+        btnMatchSelectAll.Click += (_, _) => SetAllMatchRowsChecked(true);
+        btnMatchDeselectAll.Click += (_, _) => SetAllMatchRowsChecked(false);
+        btnDeliveryWaiting.Click += async (_, _) => await ExecuteDeliveryWaitingAsync();
+        matchBtnPanel.Controls.AddRange(new Control[] { btnMatchSelectAll, btnMatchDeselectAll, btnDeliveryWaiting, btnPush });
         subMatch.Controls.Add(dgvMatch);
         subMatch.Controls.Add(matchBtnPanel);
 
@@ -739,6 +810,48 @@ public partial class MainForm : Form
 
         tabStock.Controls.Add(dgvStock);
         tabStock.Controls.Add(top);
+    }
+
+    private void BuildTokenTab()
+    {
+        var top = new Panel { Dock = DockStyle.Top, Height = 46 };
+        var lbl = new Label
+        {
+            Text = "Cafe24 Refresh Token 수동 관리. 만료 5일 이내면 시작 시 경고를 표시합니다.",
+            Location = new Point(8, 13),
+            AutoSize = true,
+            ForeColor = Color.DimGray
+        };
+        btnTokenRefresh = new Button { Text = "🔄 선택 마켓 갱신", Location = new Point(500, 8), Width = 140, Height = 30 };
+        btnTokenReauth = new Button { Text = "🔐 재인증 도구", Location = new Point(650, 8), Width = 120, Height = 30 };
+        btnTokenReload = new Button { Text = "↻ 새로고침", Location = new Point(780, 8), Width = 100, Height = 30 };
+        btnTokenRefresh.Click += async (_, _) => await RefreshSelectedTokenAsync();
+        btnTokenReauth.Click += (_, _) => OpenReauthToolForSelectedMarket();
+        btnTokenReload.Click += (_, _) => LoadTokenStatuses(showWarning: false);
+        top.Controls.AddRange(new Control[] { lbl, btnTokenRefresh, btnTokenReauth, btnTokenReload });
+
+        dgvTokens = CreateGridView();
+        dgvTokens.ReadOnly = true;
+        dgvTokens.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+        dgvTokens.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        dgvTokens.MultiSelect = false;
+        dgvTokens.Columns.Add("Market", "마켓명");
+        dgvTokens.Columns.Add("MallId", "Mall ID");
+        dgvTokens.Columns.Add("AccessExpiry", "Access 만료");
+        dgvTokens.Columns.Add("RefreshExpiry", "Refresh 만료");
+        dgvTokens.Columns.Add("Remain", "남은 기간");
+        dgvTokens.Columns.Add("Status", "상태");
+        dgvTokens.Columns.Add("Path", "JSON 파일");
+        dgvTokens.Columns["Market"]!.Width = 140;
+        dgvTokens.Columns["MallId"]!.Width = 130;
+        dgvTokens.Columns["AccessExpiry"]!.Width = 150;
+        dgvTokens.Columns["RefreshExpiry"]!.Width = 150;
+        dgvTokens.Columns["Remain"]!.Width = 100;
+        dgvTokens.Columns["Status"]!.Width = 180;
+        dgvTokens.Columns["Path"]!.Width = 420;
+
+        tabToken.Controls.Add(dgvTokens);
+        tabToken.Controls.Add(top);
     }
 
     private async Task InitStockTabAsync()
@@ -842,6 +955,103 @@ public partial class MainForm : Form
         return grid;
     }
 
+    private void EnsureOrderStatusFilterMenu()
+    {
+        if (_orderStatusFilterMenu != null)
+            return;
+
+        _clbOrderStatusFilter = new CheckedListBox
+        {
+            CheckOnClick = true,
+            BorderStyle = BorderStyle.None,
+            IntegralHeight = false,
+            Location = new Point(8, 8),
+            Size = new Size(126, 86),
+            Font = new Font("맑은 고딕", 9f)
+        };
+        foreach (var option in GetCafe24OrderStatusFilterOptions())
+            _clbOrderStatusFilter.Items.Add(option, option.Code == "N20");
+        _clbOrderStatusFilter.ItemCheck += (_, _) => BeginInvoke(new Action(UpdateOrderStatusFilterButtonText));
+
+        var btnAll = new Button { Text = "전체", Location = new Point(8, 100), Width = 58, Height = 26 };
+        var btnNone = new Button { Text = "해제", Location = new Point(72, 100), Width = 58, Height = 26 };
+        btnAll.Click += (_, _) => SetAllOrderStatusFiltersChecked(true);
+        btnNone.Click += (_, _) => SetAllOrderStatusFiltersChecked(false);
+
+        var panel = new Panel
+        {
+            Size = new Size(142, 134),
+            Padding = new Padding(8),
+            BackColor = Color.White
+        };
+        panel.Controls.Add(_clbOrderStatusFilter);
+        panel.Controls.Add(btnAll);
+        panel.Controls.Add(btnNone);
+
+        _orderStatusFilterMenu = new ContextMenuStrip
+        {
+            ShowImageMargin = false,
+            ShowCheckMargin = false,
+            Padding = Padding.Empty
+        };
+        _orderStatusFilterMenu.Items.Add(new ToolStripControlHost(panel)
+        {
+            AutoSize = false,
+            Size = panel.Size,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        });
+
+        UpdateOrderStatusFilterButtonText();
+    }
+
+    private void ShowOrderStatusFilterMenu()
+    {
+        EnsureOrderStatusFilterMenu();
+        _orderStatusFilterMenu?.Show(btnOrderStatusFilter, new Point(0, btnOrderStatusFilter.Height));
+    }
+
+    private void SetAllOrderStatusFiltersChecked(bool isChecked)
+    {
+        if (_clbOrderStatusFilter == null)
+            return;
+
+        for (var i = 0; i < _clbOrderStatusFilter.Items.Count; i++)
+            _clbOrderStatusFilter.SetItemChecked(i, isChecked);
+
+        UpdateOrderStatusFilterButtonText();
+    }
+
+    private void UpdateOrderStatusFilterButtonText()
+    {
+        if (btnOrderStatusFilter == null || _clbOrderStatusFilter == null)
+            return;
+
+        var selectedLabels = _clbOrderStatusFilter.CheckedItems
+            .OfType<OrderStatusFilterOption>()
+            .Select(option => option.Label)
+            .ToList();
+
+        btnOrderStatusFilter.Text = selectedLabels.Count switch
+        {
+            0 => "상태 선택 ▼",
+            1 => $"{selectedLabels[0]} ▼",
+            var count when count == _clbOrderStatusFilter.Items.Count => "전체조회 ▼",
+            _ => $"{selectedLabels.Count}개 상태 ▼"
+        };
+    }
+
+    private static IReadOnlyList<OrderStatusFilterOption> GetCafe24OrderStatusFilterOptions()
+    {
+        return new[]
+        {
+            new OrderStatusFilterOption("배송준비중", "N20"),
+            new OrderStatusFilterOption("배송대기", "N21"),
+            new OrderStatusFilterOption("배송중", "N30"),
+            new OrderStatusFilterOption("배송완료", "N40")
+        };
+    }
+
     private void WireEvents()
     {
         cboSheet.SelectedIndexChanged += async (_, _) => await LoadVendorsAsync();
@@ -852,6 +1062,7 @@ public partial class MainForm : Form
         btnPush.Click += async (_, _) => await ExecutePushAsync();
         btnExportFailed.Click += (_, _) => ExportFailed();
         btnUserSettings.Click += (_, _) => OpenUserSettings();
+        btnLogout.Click += (_, _) => LogoutCurrentUser();
         if (btnStockLoad != null) btnStockLoad.Click += async (_, _) => await LoadStockSheetPreviewAsync();
     }
 
@@ -872,7 +1083,15 @@ public partial class MainForm : Form
             var selectedClients = GetSelectedMarketClients();
             if (selectedClients.Count == 0)
             {
-                MessageBox.Show("조회할 수집원을 하나 이상 선택하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("설정된 수집원이 없습니다. 우측 상단 '마켓 설정'에서 JSON/API 키를 먼저 추가하세요.",
+                    "마켓 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var cafe24OrderStatuses = GetSelectedCafe24OrderStatusCodes();
+            if (selectedClients.Any(client => client is Cafe24ApiClient) && cafe24OrderStatuses.Count == 0)
+            {
+                MessageBox.Show("조회할 주문상태를 1개 이상 체크하세요.", "주문상태 선택", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -885,8 +1104,25 @@ public partial class MainForm : Form
                 try
                 {
                     var progress = new Progress<string>(msg => _log.Info($"[{sourceLabel}] {msg}"));
-                    var requestedStatus = client is Cafe24ApiClient ? "N20" : null;
-                    var orders = await client.FetchRecentOrders(dtpStart.Value, dtpEnd.Value, progress, requestedStatus);
+                    var orders = new List<Cafe24Order>();
+                    if (client is Cafe24ApiClient)
+                    {
+                        foreach (var statusCode in cafe24OrderStatuses)
+                        {
+                            var statusLabel = ResolveCafe24OrderStatusLabel(statusCode);
+                            lblStatus.Text = $"🔄 {sourceLabel} {statusLabel} 조회 중...";
+                            orders.AddRange(await client.FetchRecentOrders(dtpStart.Value, dtpEnd.Value, progress, statusCode));
+                        }
+
+                        orders = orders
+                            .DistinctBy(order => string.Join("|", order.MallId, order.OrderId, order.OrderItemCode, order.OrderStatus), StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                    }
+                    else
+                    {
+                        orders = await client.FetchRecentOrders(dtpStart.Value, dtpEnd.Value, progress, null);
+                    }
+
                     foreach (var order in orders)
                     {
                         if (string.IsNullOrWhiteSpace(order.MallId))
@@ -1079,12 +1315,105 @@ public partial class MainForm : Form
         }
     }
 
+    private void WireMatchGridCheckInteractions()
+    {
+        dgvMatch.CellMouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left || !IsMatchConfirmCell(e.RowIndex, e.ColumnIndex))
+                return;
+
+            var nextValue = !IsMatchRowChecked(e.RowIndex);
+            if ((ModifierKeys & Keys.Shift) == Keys.Shift && _matchLastConfirmRowIndex >= 0)
+                SetMatchRowRangeChecked(_matchLastConfirmRowIndex, e.RowIndex, nextValue);
+            else
+                SetMatchRowChecked(e.RowIndex, nextValue);
+
+            _matchLastConfirmRowIndex = e.RowIndex;
+            _matchConfirmDragActive = true;
+            _matchConfirmDragValue = nextValue;
+        };
+
+        dgvMatch.MouseMove += (_, e) =>
+        {
+            if (!_matchConfirmDragActive || e.Button != MouseButtons.Left)
+                return;
+
+            var hit = dgvMatch.HitTest(e.X, e.Y);
+            if (hit.RowIndex >= 0)
+                SetMatchRowChecked(hit.RowIndex, _matchConfirmDragValue);
+        };
+
+        dgvMatch.MouseUp += (_, _) => _matchConfirmDragActive = false;
+        dgvMatch.Leave += (_, _) => _matchConfirmDragActive = false;
+    }
+
+    private bool IsMatchConfirmCell(int rowIndex, int columnIndex)
+    {
+        return rowIndex >= 0 &&
+               columnIndex >= 0 &&
+               columnIndex < dgvMatch.Columns.Count &&
+               dgvMatch.Columns[columnIndex].Name == "Confirm";
+    }
+
+    private bool IsMatchRowChecked(int rowIndex)
+    {
+        if (rowIndex < 0 || rowIndex >= dgvMatch.Rows.Count)
+            return false;
+
+        return dgvMatch.Rows[rowIndex].Cells["Confirm"]?.Value is true;
+    }
+
+    private void SetMatchRowChecked(int rowIndex, bool isChecked)
+    {
+        if (rowIndex < 0 || rowIndex >= dgvMatch.Rows.Count)
+            return;
+
+        var row = dgvMatch.Rows[rowIndex];
+        if (row.IsNewRow)
+            return;
+
+        row.Cells["Confirm"].Value = isChecked;
+    }
+
+    private void SetMatchRowRangeChecked(int startRowIndex, int endRowIndex, bool isChecked)
+    {
+        var start = Math.Min(startRowIndex, endRowIndex);
+        var end = Math.Max(startRowIndex, endRowIndex);
+        for (var rowIndex = start; rowIndex <= end; rowIndex++)
+            SetMatchRowChecked(rowIndex, isChecked);
+    }
+
+    private void SetAllMatchRowsChecked(bool isChecked)
+    {
+        foreach (DataGridViewRow row in dgvMatch.Rows)
+        {
+            if (row.IsNewRow)
+                continue;
+
+            row.Cells["Confirm"].Value = isChecked;
+        }
+    }
+
+    private bool TryGetMatchResultFromRow(DataGridViewRow row, out MatchResult matchResult)
+    {
+        matchResult = null!;
+        var value = row.Cells["MrId"]?.Value;
+        if (value == null || !int.TryParse(value.ToString(), out var mrIdx))
+            return false;
+
+        if (mrIdx < 0 || mrIdx >= _matchResults.Count)
+            return false;
+
+        matchResult = _matchResults[mrIdx];
+        return true;
+    }
+
     private void ShowMatchResults()
     {
         dgvMatch.Columns.Clear();
         dgvMatch.Rows.Clear();
 
-        dgvMatch.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Confirm", HeaderText = "확정", Width = 45 });
+        dgvMatch.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Confirm", HeaderText = "선택", Width = 45, ReadOnly = true });
         dgvMatch.Columns.Add("MrId", "ID");
         dgvMatch.Columns.Add("SrcPhone", "출고-휴대폰");
         dgvMatch.Columns.Add("SrcName", "출고-수령인");
@@ -1232,8 +1561,33 @@ public partial class MainForm : Form
     // ═══════════════════════════════════════
     // 반영 실행
     // ═══════════════════════════════════════
-    private async Task ExecutePushAsync()
+    private Task ExecutePushAsync()
     {
+        return ExecuteShipmentApiActionAsync(ShipmentApiAction.Shipping);
+    }
+
+    private Task ExecuteDeliveryWaitingAsync()
+    {
+        return ExecuteShipmentApiActionAsync(ShipmentApiAction.DeliveryWaiting);
+    }
+
+    private enum ShipmentApiAction
+    {
+        DeliveryWaiting,
+        Shipping
+    }
+
+    private async Task ExecuteShipmentApiActionAsync(ShipmentApiAction action)
+    {
+        var isDeliveryWaiting = action == ShipmentApiAction.DeliveryWaiting;
+        var actionLabel = isDeliveryWaiting ? "배송대기" : "배송중";
+        var actionButton = isDeliveryWaiting ? btnDeliveryWaiting : btnPush;
+        var idleButtonText = actionLabel;
+        var progressButtonText = $"{actionLabel} 반영 중...";
+        var successMatchStatus = isDeliveryWaiting ? "delivery_waiting" : "pushed";
+        var successSourceStatus = isDeliveryWaiting ? "delivery_waiting" : "pushed";
+        var successProgressCode = isDeliveryWaiting ? "delivery_waiting" : "pushed";
+
         var confirmed = new List<MatchResult>();
         for (int i = 0; i < dgvMatch.Rows.Count; i++)
         {
@@ -1249,7 +1603,7 @@ public partial class MainForm : Form
             }
         }
 
-        if (confirmed.Count == 0) { MessageBox.Show("확정된 항목이 없습니다.", "알림"); return; }
+        if (confirmed.Count == 0) { MessageBox.Show("선택된 항목이 없습니다.", "알림"); return; }
 
         var uploadBlocked = confirmed.Where(matchResult => matchResult.PendingShipment).ToList();
         var readyToPush = confirmed.Where(matchResult => !matchResult.PendingShipment).ToList();
@@ -1259,15 +1613,15 @@ public partial class MainForm : Form
             return;
         }
 
-        var confirmationMessage = $"{readyToPush.Count}건을 원본 마켓 API에 반영합니다.";
+        var confirmationMessage = $"{readyToPush.Count}건을 {actionLabel} 상태로 API 반영합니다.";
         if (uploadBlocked.Count > 0)
             confirmationMessage += $"\n미출고 확인 {uploadBlocked.Count}건은 자동으로 제외됩니다.";
         confirmationMessage += "\n계속?";
         if (MessageBox.Show(confirmationMessage,
             "반영 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
-        btnPush.Enabled = false;
-        btnPush.Text = "반영 중...";
+        actionButton.Enabled = false;
+        actionButton.Text = progressButtonText;
 
         dgvResult.Columns.Clear();
         dgvResult.Rows.Clear();
@@ -1326,7 +1680,7 @@ public partial class MainForm : Form
                 {
                     var missingIdx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, "", "❌ 실패", "대상 마켓 API를 찾지 못했습니다.");
                     dgvResult.Rows[missingIdx].DefaultCellStyle.BackColor = Color.FromArgb(255, 220, 220);
-                    _log.Error($"송장 반영 대상 API 없음: {marketName} ({mr.Cafe24MallId}) / 주문 {mr.Cafe24OrderId}");
+                    _log.Error($"{actionLabel} 대상 API 없음: {marketName} ({mr.Cafe24MallId}) / 주문 {mr.Cafe24OrderId}");
                     fail++;
                     continue;
                 }
@@ -1395,7 +1749,9 @@ public partial class MainForm : Form
                     continue;
                 }
 
-                var (success, resp, status) = await api.PushTrackingNumber(order, tracking, code);
+                var (success, resp, status) = isDeliveryWaiting
+                    ? await PushDeliveryWaitingAsync(api, order, tracking, code)
+                    : await api.PushTrackingNumber(order, tracking, code);
 
                 if (!string.IsNullOrWhiteSpace(targetKey))
                     attemptedTargets[targetKey] = normalizedTracking;
@@ -1406,7 +1762,7 @@ public partial class MainForm : Form
                     Cafe24MallId = mr.Cafe24MallId,
                     Cafe24MarketName = marketName,
                     Cafe24OrderId = mr.Cafe24OrderId,
-                    RequestBody = JsonConvert.SerializeObject(new { tracking, code }),
+                    RequestBody = JsonConvert.SerializeObject(new { tracking, code, status = isDeliveryWaiting ? "standby" : "shipping" }),
                     ResponseBody = resp,
                     HttpStatusCode = status,
                     Result = success ? "success" : "fail",
@@ -1414,12 +1770,12 @@ public partial class MainForm : Form
                     PushedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
                 });
 
-                var nextStatus = success ? "pushed" : "push_failed";
+                var nextStatus = success ? successMatchStatus : "push_failed";
                 _db.UpdateMatchStatus(mr.Id, nextStatus, true);
                 if (sourceRowId > 0)
-                    _db.UpdateSourceRowStatus(sourceRowId, success ? "pushed" : "failed", mr.Cafe24OrderId);
+                    _db.UpdateSourceRowStatus(sourceRowId, success ? successSourceStatus : "failed", mr.Cafe24OrderId);
                 if (success)
-                    SetPersistedOrderProgressCodeEx(order, "pushed", saveState: false);
+                    SetPersistedOrderProgressCodeEx(order, successProgressCode, saveState: false);
 
                 var idx = dgvResult.Rows.Add(marketName, mr.Cafe24OrderId, tracking,
                     success ? "✅ 성공" : $"❌ 실패 ({status})", resp.Length > 200 ? resp[..200] : resp);
@@ -1429,19 +1785,31 @@ public partial class MainForm : Form
 
             SaveEnhancedState();
             RefreshDataPreviewProgressStatesEx();
-            _log.Info($"반영 완료: 성공 {ok}, 실패 {fail}");
+            _log.Info($"{actionLabel} 반영 완료: 성공 {ok}, 실패 {fail}");
             tabShipSub.SelectedIndex = 2;
         }
         catch (Exception ex)
         {
-            _log.Error("송장 반영 오류", ex);
-            MessageBox.Show($"송장 반영 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _log.Error($"{actionLabel} 반영 오류", ex);
+            MessageBox.Show($"{actionLabel} 반영 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
-            btnPush.Enabled = true;
-            btnPush.Text = "✅ 확정 항목 반영";
+            actionButton.Enabled = true;
+            actionButton.Text = idleButtonText;
         }
+    }
+
+    private static Task<(bool success, string responseBody, int statusCode)> PushDeliveryWaitingAsync(
+        IMarketplaceApiClient api,
+        Cafe24Order order,
+        string trackingNumber,
+        string shippingCompanyCode)
+    {
+        if (api is Cafe24ApiClient cafe24Api)
+            return cafe24Api.PushDeliveryWaiting(order, trackingNumber, shippingCompanyCode);
+
+        return Task.FromResult((false, "배송대기 API는 Cafe24 수집원만 지원합니다.", 0));
     }
 
     private Cafe24Order? FindOrderForMatch(MatchResult matchResult)
@@ -1455,6 +1823,187 @@ public partial class MainForm : Form
                    string.Equals(order.OrderId, matchResult.Cafe24OrderId, StringComparison.OrdinalIgnoreCase));
     }
 
+    private void OpenReauthToolForSelectedMarket()
+    {
+        var status = FindSelectedTokenStatus();
+        if (status == null)
+        {
+            MessageBox.Show("재인증할 마켓을 선택하세요.", "토큰 관리", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var authToolPath = ResolveCafe24AuthPath();
+        if (string.IsNullOrWhiteSpace(authToolPath))
+        {
+            MessageBox.Show(
+                "Cafe24Auth 실행 파일을 찾을 수 없습니다.\n\n" +
+                "설치형 버전에서는 메인 프로그램 옆의 Cafe24Auth 폴더에 함께 설치됩니다.\n" +
+                "개발 중이라면 바탕화면 Cafe24Auth 프로젝트 빌드 경로도 함께 확인하세요.",
+                "재인증 도구 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = authToolPath,
+            WorkingDirectory = Path.GetDirectoryName(authToolPath) ?? AppContext.BaseDirectory,
+            UseShellExecute = true
+        });
+
+        MessageBox.Show($"Cafe24Auth를 열었습니다.\n\n마켓: {status.DisplayName} ({status.MallId})\n선택 후 '🔐 재인증'을 진행하세요.",
+            "재인증 도구 실행", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static string? ResolveCafe24AuthPath()
+    {
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var envPath = Environment.GetEnvironmentVariable("CAFE24_AUTH_PATH");
+        var candidates = new[]
+        {
+            envPath,
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Cafe24Auth", "Cafe24Auth.exe")),
+            Path.Combine(AppContext.BaseDirectory, "Cafe24Auth", "Cafe24Auth.exe"),
+            Path.Combine(localAppData, "Programs", "Cafe24ShipmentManager", "Cafe24Auth", "Cafe24Auth.exe"),
+            Path.Combine(desktop, "Cafe24Auth", "publish5", "Cafe24Auth.exe"),
+            Path.Combine(desktop, "Cafe24Auth", "bin", "Release", "net6.0-windows", "Cafe24Auth.exe"),
+            Path.Combine(desktop, "Cafe24Auth", "bin", "Debug", "net6.0-windows", "Cafe24Auth.exe")
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    private void LoadTokenStatuses(bool showWarning)
+    {
+        if (dgvTokens == null)
+            return;
+
+        var statuses = _tokenRefreshService
+            .LoadStatuses(_marketClients.OfType<Cafe24ApiClient>().OrderBy(client => client.DisplayName, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        dgvTokens.Rows.Clear();
+        foreach (var status in statuses)
+        {
+            var idx = dgvTokens.Rows.Add(
+                status.DisplayName,
+                status.MallId,
+                FormatDateTime(status.AccessExpiresAt),
+                FormatDateTime(status.RefreshExpiresAt),
+                FormatRemaining(status.RefreshRemaining),
+                status.StatusMessage,
+                status.TokenFilePath);
+
+            var row = dgvTokens.Rows[idx];
+            row.Tag = status;
+            if (!status.HasRefreshToken || status.RefreshRemaining.TotalDays <= 0)
+                row.DefaultCellStyle.BackColor = UiPalette.DangerSurface;
+            else if (status.NeedsRefreshWarning)
+                row.DefaultCellStyle.BackColor = UiPalette.WarningSurface;
+            else
+                row.DefaultCellStyle.BackColor = UiPalette.SuccessSurface;
+        }
+
+        if (showWarning)
+            ShowRefreshWarning(statuses);
+    }
+
+    private async Task RefreshSelectedTokenAsync()
+    {
+        var status = FindSelectedTokenStatus();
+        if (status == null)
+        {
+            MessageBox.Show("갱신할 마켓을 선택하세요.", "토큰 관리", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            btnTokenRefresh.Enabled = false;
+            var result = await _tokenRefreshService.RefreshAsync(status);
+            if (!result.success)
+            {
+                MessageBox.Show(result.message, "토큰 갱신 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            LoadTokenStatuses(showWarning: false);
+            SelectTokenRow(status.TokenFilePath);
+            MessageBox.Show("토큰 갱신이 완료되었습니다. Refresh 기준일도 현재 시각으로 갱신했습니다.",
+                "토큰 갱신 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        finally
+        {
+            btnTokenRefresh.Enabled = true;
+        }
+    }
+
+    private Cafe24TokenStatus? FindSelectedTokenStatus()
+    {
+        return dgvTokens?.CurrentRow?.Tag as Cafe24TokenStatus;
+    }
+
+    private void SelectTokenRow(string tokenFilePath)
+    {
+        if (dgvTokens == null)
+            return;
+
+        foreach (DataGridViewRow row in dgvTokens.Rows)
+        {
+            if (row.Tag is Cafe24TokenStatus status &&
+                string.Equals(status.TokenFilePath, tokenFilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                row.Selected = true;
+                dgvTokens.CurrentCell = row.Cells[0];
+                return;
+            }
+        }
+    }
+
+    private void ShowRefreshWarning(IReadOnlyList<Cafe24TokenStatus> statuses)
+    {
+        if (_tokenWarningShown)
+            return;
+
+        var warningTargets = statuses
+            .Where(status => status.HasRefreshToken && status.NeedsRefreshWarning)
+            .OrderBy(status => status.RefreshRemaining)
+            .ToList();
+        if (warningTargets.Count == 0)
+            return;
+
+        _tokenWarningShown = true;
+        var lines = warningTargets
+            .Select(status => $"- {status.DisplayName} ({status.MallId}) : {FormatRemaining(status.RefreshRemaining)}")
+            .ToArray();
+        var message = "다음 마켓의 Refresh Token 만료가 5일 이내입니다.\n\n" +
+                      string.Join("\n", lines) +
+                      "\n\n'토큰 관리' 탭에서 수동 갱신하세요.";
+        MessageBox.Show(message, "Refresh Token 경고", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private static string FormatDateTime(DateTime value)
+    {
+        return value == DateTime.MinValue ? "-" : value.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private static string FormatRemaining(TimeSpan value)
+    {
+        if (value.TotalDays <= 0)
+            return "만료";
+        if (value.TotalDays >= 1)
+            return $"{(int)Math.Ceiling(value.TotalDays)}일";
+        if (value.TotalHours >= 1)
+            return $"{(int)Math.Ceiling(value.TotalHours)}시간";
+        return $"{Math.Max(1, (int)Math.Ceiling(value.TotalMinutes))}분";
+    }
+
     private void OpenUserSettings()
     {
         using var profileForm = new UserProfileForm(
@@ -1465,14 +2014,78 @@ public partial class MainForm : Form
         if (profileForm.ShowDialog(this) != DialogResult.OK)
             return;
 
-        MessageBox.Show("키 설정이 저장되었습니다. 다음 로그인부터 적용됩니다.",
-            "저장 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        var restartNow = MessageBox.Show("마켓 설정이 저장되었습니다. 지금 다시 시작해 반영할까요?",
+            "저장 완료", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (restartNow == DialogResult.Yes)
+            RestartApplication();
+    }
+
+    private void LogoutCurrentUser()
+    {
+        var confirmed = MessageBox.Show("현재 계정에서 로그아웃하고 로그인 화면으로 돌아가시겠습니까?",
+            "로그아웃", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (confirmed != DialogResult.Yes)
+            return;
+
+        try
+        {
+            _authService.Logout(_currentUser);
+            RestartApplication();
+        }
+        catch (Exception ex)
+        {
+            _log.Error("로그아웃 실패", ex);
+            MessageBox.Show($"로그아웃 중 오류:\n{ex.Message}",
+                "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void RestartApplication()
+    {
+        BeginInvoke(new Action(() =>
+        {
+            Application.Restart();
+            Close();
+        }));
     }
 
     private string? GetSelectedShippingCompanyName()
     {
         return cboShippingCompany.SelectedItem?.ToString();
     }
+
+    private IReadOnlyList<string> GetSelectedCafe24OrderStatusCodes()
+    {
+        if (_clbOrderStatusFilter == null)
+            return new[] { "N20" };
+
+        return _clbOrderStatusFilter.CheckedItems
+            .OfType<OrderStatusFilterOption>()
+            .Select(option => option.Code)
+            .ToList();
+    }
+
+    private static string ResolveCafe24OrderStatusLabel(string statusCode)
+    {
+        return GetCafe24OrderStatusFilterOptions()
+            .FirstOrDefault(option => string.Equals(option.Code, statusCode, StringComparison.OrdinalIgnoreCase))
+            ?.Label ?? statusCode;
+    }
+
+    private sealed class OrderStatusFilterOption
+    {
+        public OrderStatusFilterOption(string label, string code)
+        {
+            Label = label;
+            Code = code;
+        }
+
+        public string Label { get; }
+        public string Code { get; }
+
+        public override string ToString() => Label;
+    }
+
     private string ResolveShipCode(IMarketplaceApiClient client, string? name)
     {
         return client.ResolveShippingCompanyCode(name);
@@ -1541,13 +2154,3 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
-
-
-
-
-
-
-
-
-
-

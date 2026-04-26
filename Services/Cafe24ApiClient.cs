@@ -1,6 +1,7 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using Cafe24ShipmentManager.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -25,7 +26,6 @@ public class Cafe24Config
     public string Scope { get; set; } = "";
     public string TokenFilePath { get; set; } = "";
 }
-
 public class Cafe24ApiClient : IMarketplaceApiClient
 {
     private readonly HttpClient _http;
@@ -64,10 +64,12 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             Timeout = TimeSpan.FromSeconds(30)
         };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", config.AccessToken);
-        _http.DefaultRequestHeaders.Add("X-Cafe24-Api-Version", config.ApiVersion);
+        ApplyApiVersionHeader();
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
     public string SourceKey => _config.MallId;
+    public string MallId => _config.MallId;
+    public string TokenFilePath => _config.TokenFilePath;
     public string DisplayName => ResolveMarketDisplayName();
     public string DefaultShippingCompanyCode => _config.DefaultShippingCompanyCode;
     public int DefaultOrderFetchDays => _config.OrderFetchDays;
@@ -203,6 +205,14 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         return PushTrackingNumber(order.OrderId, order.OrderItemCode, trackingNumber, shippingCompanyCode);
     }
 
+    /// <summary>
+    /// 주문에 송장번호 입력 + 배송대기 처리
+    /// </summary>
+    public Task<(bool success, string responseBody, int statusCode)> PushDeliveryWaiting(Cafe24Order order, string trackingNumber, string shippingCompanyCode)
+    {
+        return PushShipmentStatus(order.OrderId, order.OrderItemCode, trackingNumber, shippingCompanyCode, "standby", "배송대기");
+    }
+
     public string ResolveShippingCompanyCode(string? shippingCompanyName)
     {
         if (string.IsNullOrWhiteSpace(shippingCompanyName))
@@ -216,13 +226,20 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         return _config.DefaultShippingCompanyCode;
     }
 
-    public async Task<(bool success, string responseBody, int statusCode)> PushTrackingNumber(
+    public Task<(bool success, string responseBody, int statusCode)> PushTrackingNumber(
         string orderId, string orderItemCode, string trackingNumber, string shippingCompanyCode)
     {
-        // Cafe24 배송 정보 업데이트 API
-        // PUT /api/v2/admin/orders/{order_id}/items/{order_item_code}/shipments
-        // 먼저 shipment 조회 후 업데이트, 없으면 생성
+        return PushShipmentStatus(orderId, orderItemCode, trackingNumber, shippingCompanyCode, "shipping", "송장 반영");
+    }
 
+    private async Task<(bool success, string responseBody, int statusCode)> PushShipmentStatus(
+        string orderId,
+        string orderItemCode,
+        string trackingNumber,
+        string shippingCompanyCode,
+        string status,
+        string actionLabel)
+    {
         try
         {
             // Cafe24 배송 정보 등록 API: POST /admin/orders/{order_id}/shipments
@@ -236,12 +253,12 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                     order_item_code = new[] { orderItemCode },
                     tracking_no = trackingNumber,
                     shipping_company_code = shippingCompanyCode,
-                    status = "shipping"
+                    status
                 }
             };
 
             var jsonPayload = JsonConvert.SerializeObject(payload);
-            _log.Info($"[{ResolveMarketDisplayName()}] 송장 반영 요청: {orderId} → {shipmentsUrl}, body={jsonPayload}");
+            _log.Info($"[{ResolveMarketDisplayName()}] {actionLabel} 요청: {orderId} → {shipmentsUrl}, body={jsonPayload}");
 
             var resp = await ExecuteWithRetry(() =>
             {
@@ -257,15 +274,15 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             var success = resp?.IsSuccessStatusCode ?? false;
 
             if (success)
-                _log.Info($"[{ResolveMarketDisplayName()}] 송장 반영 성공: {orderId} → {trackingNumber}");
+                _log.Info($"[{ResolveMarketDisplayName()}] {actionLabel} 성공: {orderId} → {trackingNumber}");
             else
-                _log.Error($"[{ResolveMarketDisplayName()}] 송장 반영 실패: {orderId} → {statusCode}: {respBody}");
+                _log.Error($"[{ResolveMarketDisplayName()}] {actionLabel} 실패: {orderId} → {statusCode}: {respBody}");
 
             return (success, respBody, statusCode);
         }
         catch (Exception ex)
         {
-            _log.Error($"[{ResolveMarketDisplayName()}] 송장 반영 예외: {orderId}", ex);
+            _log.Error($"[{ResolveMarketDisplayName()}] {actionLabel} 예외: {orderId}", ex);
             return (false, ex.Message, 0);
         }
     }
@@ -273,6 +290,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     private async Task<HttpResponseMessage?> ExecuteWithRetry(Func<Task<HttpResponseMessage>> action)
     {
         var reauthorizedForScope = false;
+        var adjustedApiVersion = false;
 
         for (int i = 0; i < MaxRetries; i++)
         {
@@ -280,15 +298,27 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             {
                 var resp = await action();
 
-                // 401 → 토큰 갱신 후 재시도
                 if (resp.StatusCode == HttpStatusCode.Unauthorized && i == 0)
                 {
-                    _log.Warn("Access Token 만료 감지, 자동 갱신 시도...");
-                    if (await RefreshAccessTokenAsync())
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (IsInvalidAccessTokenResponse(body))
                     {
-                        resp = await action();
-                        return resp;
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 만료 감지. Refresh Token으로 자동 갱신을 시도합니다.");
+
+                        if (await RefreshAccessTokenAsync(allowReauthorize: false))
+                        {
+                            _log.Info($"[{ResolveMarketDisplayName()}] Access Token 자동 갱신 완료. 요청을 다시 시도합니다.");
+                            resp.Dispose();
+                            continue;
+                        }
+
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 자동 갱신 실패. '토큰 관리' 탭에서 수동 갱신 또는 재인증 후 다시 시도하세요.");
                     }
+                    else
+                    {
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 인증 오류 감지. '토큰 관리' 탭에서 수동 갱신 후 다시 시도하세요.");
+                    }
+
                     return resp;
                 }
 
@@ -297,17 +327,20 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                     var body = await resp.Content.ReadAsStringAsync();
                     if (body.Contains("insufficient_scope", StringComparison.OrdinalIgnoreCase))
                     {
-                        _log.Warn("Access Token scope 부족 감지, OAuth 재인증 시도...");
-                        if (await ReauthorizeViaOAuthAsync())
-                        {
-                            reauthorizedForScope = true;
-                            resp = await action();
-                        }
-
+                        _log.Warn($"[{ResolveMarketDisplayName()}] scope 부족 감지. Cafe24 인증을 다시 확인하세요.");
                         return resp;
                     }
                 }
 
+                if (resp.StatusCode == HttpStatusCode.BadRequest && !adjustedApiVersion)
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (TryAdjustApiVersion(body))
+                    {
+                        adjustedApiVersion = true;
+                        resp = await action();
+                    }
+                }
                 // Rate limit 처리
                 if (resp.StatusCode == HttpStatusCode.TooManyRequests)
                 {
@@ -327,10 +360,12 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             }
         }
         return null;
-    }    /// <summary>
+    }
+
+    /// <summary>
     /// Refresh Token으로 Access Token 자동 갱신 + appsettings.json 저장
     /// </summary>
-    private async Task<bool> RefreshAccessTokenAsync()
+    private async Task<bool> RefreshAccessTokenAsync(bool allowReauthorize = true)
     {
         if (string.IsNullOrEmpty(_config.ClientId) || string.IsNullOrEmpty(_config.ClientSecret) ||
             string.IsNullOrEmpty(_config.RefreshToken))
@@ -381,6 +416,9 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             if (!resp.IsSuccessStatusCode)
             {
                 _log.Error($"토큰 갱신 실패 ({resp.StatusCode}): {body}");
+                if (!allowReauthorize)
+                    return false;
+
                 _log.Info("OAuth 브라우저 재인증을 시도합니다...");
                 return await ReauthorizeViaOAuthAsync();
             }
@@ -406,7 +444,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             _log.Info("Access Token 자동 갱신 성공");
 
             // appsettings.json 저장
-            SaveTokensToConfig();
+            SaveTokensToConfig(markTokenRefresh: true);
 
             return true;
         }
@@ -415,6 +453,11 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             _log.Error("토큰 갱신 예외", ex);
             return false;
         }
+    }
+    private static bool IsInvalidAccessTokenResponse(string responseBody)
+    {
+        return responseBody.Contains("invalid_token", StringComparison.OrdinalIgnoreCase) ||
+               responseBody.Contains("access_token", StringComparison.OrdinalIgnoreCase);
     }
     /// <summary>
     /// Refresh Token 만료 시 브라우저 OAuth 재인증으로 새 토큰 발급.
@@ -608,7 +651,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", newAccessToken);
             _log.Info("OAuth 재인증 성공 — 새 토큰 발급 완료");
 
-            SaveTokensToConfig();
+            SaveTokensToConfig(markTokenRefresh: true);
             return true;
         }
         catch (Exception ex)
@@ -687,11 +730,48 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         return string.IsNullOrWhiteSpace(_config.DisplayName) ? _config.MallId : _config.DisplayName;
     }
 
-    private void SaveTokensToConfig()
+    private void ApplyApiVersionHeader()
+    {
+        const string headerName = "X-Cafe24-Api-Version";
+        var apiVersion = string.IsNullOrWhiteSpace(_config.ApiVersion)
+            ? "2025-12-01"
+            : _config.ApiVersion.Trim();
+
+        _config.ApiVersion = apiVersion;
+        _http.DefaultRequestHeaders.Remove(headerName);
+        _http.DefaultRequestHeaders.Add(headerName, apiVersion);
+    }
+
+    private bool TryAdjustApiVersion(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+            return false;
+
+        var match = Regex.Match(
+            responseBody,
+            @"default value for the app version is (?<version>\d{4}-\d{2}-\d{2})",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (!match.Success)
+            return false;
+
+        var newVersion = match.Groups["version"].Value;
+        if (string.IsNullOrWhiteSpace(newVersion) ||
+            string.Equals(newVersion, _config.ApiVersion, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var oldVersion = _config.ApiVersion;
+        _config.ApiVersion = newVersion;
+        ApplyApiVersionHeader();
+        SaveTokensToConfig();
+        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 API 버전 자동 조정: {oldVersion} -> {newVersion}");
+        return true;
+    }
+    private void SaveTokensToConfig(bool markTokenRefresh = false)
     {
         try
         {
-            Cafe24SharedTokenStore.Save(_config);
+            Cafe24SharedTokenStore.Save(_config, markTokenRefresh);
             _log.Info($"공유 Cafe24 토큰 파일 저장 완료: {_config.TokenFilePath}");
 
             var configPath = _config.ConfigFilePath;
@@ -712,11 +792,13 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                 var marketConfig = FindOrCreateMarketConfigEntry(markets, _config);
                 marketConfig["DisplayName"] = ResolveMarketDisplayName();
                 marketConfig["MallId"] = _config.MallId;
+                marketConfig["ApiVersion"] = _config.ApiVersion;
                 marketConfig["TokenFilePath"] = _config.TokenFilePath;
             }
             else
             {
                 cafe24["DisplayName"] = ResolveMarketDisplayName();
+                cafe24["ApiVersion"] = _config.ApiVersion;
                 cafe24["TokenFilePath"] = _config.TokenFilePath;
             }
 
@@ -755,4 +837,3 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
     }
 }
-

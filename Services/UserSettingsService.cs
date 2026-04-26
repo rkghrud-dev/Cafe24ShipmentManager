@@ -32,14 +32,29 @@ public sealed class UserSettingsService
 
     public UserSettingsDraft CreateDraftForRegistration()
     {
-        return new UserSettingsDraft
+        return new UserSettingsDraft();
+    }
+
+    public IReadOnlyList<Cafe24MarketEntry> LoadCafe24Markets(long userId)
+    {
+        return ParseCafe24MarketEntries(LoadDraft(userId).Cafe24Json);
+    }
+
+    public void SaveCafe24Markets(long userId, IEnumerable<Cafe24MarketEntry> markets, bool requireMarketplaceConfig)
+    {
+        var existingDraft = LoadDraft(userId);
+        var normalizedMarkets = NormalizeCafe24MarketEntries(markets).ToList();
+
+        var draft = new UserSettingsDraft
         {
-            GoogleCredentialPath = "credentials.json",
-            GoogleSpreadsheetId = "",
-            GoogleDefaultSheetName = "출고정보",
-            Cafe24Json = GetCafe24SampleJson(),
-            CoupangJson = GetCoupangSampleJson()
+            GoogleCredentialPath = existingDraft.GoogleCredentialPath,
+            GoogleSpreadsheetId = existingDraft.GoogleSpreadsheetId,
+            GoogleDefaultSheetName = existingDraft.GoogleDefaultSheetName,
+            Cafe24Json = BuildCafe24MarketJson(existingDraft.Cafe24Json, normalizedMarkets),
+            CoupangJson = existingDraft.CoupangJson
         };
+
+        SaveUserSettings(userId, draft, requireMarketplaceConfig);
     }
 
     public UserSettingsDraft LoadDraft(long userId)
@@ -91,11 +106,10 @@ public sealed class UserSettingsService
         var effective = (JObject)baseConfig.DeepClone();
         var settings = LoadDraft(user.Id);
 
-        if (!IsAdminUser(user))
-        {
-            effective["Cafe24"] = new JObject();
-            effective["Coupang"] = new JObject();
-        }
+        // Marketplace credentials are user-owned. Even admin starts with no sources
+        // until JSON/API settings are explicitly saved in the profile screen.
+        effective["Cafe24"] = new JObject();
+        effective["Coupang"] = new JObject();
 
         ApplyGoogleSettings(effective, settings);
         ApplyJsonSection(effective, "Cafe24", settings.Cafe24Json);
@@ -114,6 +128,145 @@ public sealed class UserSettingsService
             Cafe24Json = draft.Cafe24Json.Trim(),
             CoupangJson = draft.CoupangJson.Trim()
         };
+    }
+
+    private static IReadOnlyList<Cafe24MarketEntry> ParseCafe24MarketEntries(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return Array.Empty<Cafe24MarketEntry>();
+
+        JObject cafe24;
+        try
+        {
+            cafe24 = JObject.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<Cafe24MarketEntry>();
+        }
+
+        var result = new List<Cafe24MarketEntry>();
+        var markets = cafe24["Markets"] as JArray;
+        if (markets != null && markets.Count > 0)
+        {
+            foreach (var marketSection in markets.OfType<JObject>())
+                AddCafe24MarketEntry(result, marketSection);
+
+            return result;
+        }
+
+        if (cafe24.Properties().Any())
+            AddCafe24MarketEntry(result, cafe24);
+
+        return result;
+    }
+
+    private static void AddCafe24MarketEntry(ICollection<Cafe24MarketEntry> target, JObject marketSection)
+    {
+        var displayName = ReadString(marketSection, "DisplayName", ReadString(marketSection, "MallId", ""));
+        var tokenFilePath = ReadString(marketSection, "TokenFilePath", "");
+
+        if (string.IsNullOrWhiteSpace(displayName) && string.IsNullOrWhiteSpace(tokenFilePath))
+            return;
+
+        target.Add(new Cafe24MarketEntry
+        {
+            DisplayName = displayName,
+            TokenFilePath = tokenFilePath
+        });
+    }
+
+    private static IReadOnlyList<Cafe24MarketEntry> NormalizeCafe24MarketEntries(IEnumerable<Cafe24MarketEntry> markets)
+    {
+        var normalized = new List<Cafe24MarketEntry>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var market in markets ?? Enumerable.Empty<Cafe24MarketEntry>())
+        {
+            var displayName = market.DisplayName?.Trim() ?? "";
+            var tokenFilePath = market.TokenFilePath?.Trim() ?? "";
+
+            if (string.IsNullOrWhiteSpace(displayName) && string.IsNullOrWhiteSpace(tokenFilePath))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(displayName))
+                throw new InvalidOperationException("마켓명을 입력하세요.");
+
+            if (string.IsNullOrWhiteSpace(tokenFilePath))
+                throw new InvalidOperationException($"'{displayName}'의 JSON 키 파일을 선택하세요.");
+
+            var resolvedPath = ResolveComparablePath(tokenFilePath);
+            if (!File.Exists(resolvedPath))
+                throw new InvalidOperationException($"'{displayName}'의 JSON 키 파일을 찾을 수 없습니다: {resolvedPath}");
+
+            if (!seenNames.Add(displayName))
+                throw new InvalidOperationException($"중복된 마켓명입니다: {displayName}");
+
+            if (!seenPaths.Add(resolvedPath))
+                throw new InvalidOperationException($"같은 JSON 키 파일이 중복되었습니다: {resolvedPath}");
+
+            normalized.Add(new Cafe24MarketEntry
+            {
+                DisplayName = displayName,
+                TokenFilePath = tokenFilePath
+            });
+        }
+
+        return normalized;
+    }
+
+    private static string BuildCafe24MarketJson(string existingJson, IReadOnlyCollection<Cafe24MarketEntry> markets)
+    {
+        if (markets.Count == 0)
+            return "";
+
+        var cafe24 = new JObject();
+        if (!string.IsNullOrWhiteSpace(existingJson))
+        {
+            try
+            {
+                var existing = JObject.Parse(existingJson);
+                CopyIfPresent(existing, cafe24, "DefaultShippingCompanyCode");
+                CopyIfPresent(existing, cafe24, "OrderFetchDays");
+                CopyIfPresent(existing, cafe24, "ApiVersion");
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        cafe24["Markets"] = new JArray(markets.Select(market => new JObject
+        {
+            ["Enabled"] = true,
+            ["DisplayName"] = market.DisplayName,
+            ["TokenFilePath"] = market.TokenFilePath
+        }));
+
+        return cafe24.ToString(Formatting.Indented);
+    }
+
+    private static void CopyIfPresent(JObject source, JObject target, string propertyName)
+    {
+        var token = source[propertyName];
+        if (token == null || token.Type == JTokenType.Null)
+            return;
+
+        target[propertyName] = token.DeepClone();
+    }
+
+    private static string ResolveComparablePath(string path)
+    {
+        var expandedPath = Environment.ExpandEnvironmentVariables(path.Trim());
+        return Path.IsPathRooted(expandedPath)
+            ? expandedPath
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, expandedPath));
+    }
+
+    private static string ReadString(JObject? section, string propertyName, string fallback)
+    {
+        var value = section?[propertyName]?.ToString();
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
     }
 
     private static void ApplyGoogleSettings(JObject config, UserSettingsDraft draft)
@@ -155,49 +308,6 @@ public sealed class UserSettingsService
         {
             throw new InvalidOperationException($"{label} JSON 형식이 올바르지 않습니다: {ex.Message}");
         }
-    }
-
-    private static string GetCafe24SampleJson()
-    {
-        var sample = new JObject
-        {
-            ["Markets"] = new JArray
-            {
-                new JObject
-                {
-                    ["Enabled"] = true,
-                    ["DisplayName"] = "내 Cafe24 몰",
-                    ["MallId"] = "YOUR_MALL_ID",
-                    ["ClientId"] = "YOUR_CLIENT_ID",
-                    ["ClientSecret"] = "YOUR_CLIENT_SECRET",
-                    ["AccessToken"] = "",
-                    ["RefreshToken"] = "",
-                    ["TokenFilePath"] = "%USERPROFILE%\\Desktop\\key\\cafe24_token.json"
-                }
-            },
-            ["DefaultShippingCompanyCode"] = "0019",
-            ["OrderFetchDays"] = 14
-        };
-
-        return sample.ToString(Formatting.Indented);
-    }
-
-    private static string GetCoupangSampleJson()
-    {
-        var sample = new JObject
-        {
-            ["Enabled"] = true,
-            ["DisplayName"] = "내 쿠팡 마켓",
-            ["VendorId"] = "YOUR_COUPANG_VENDOR_ID",
-            ["AccessKey"] = "YOUR_COUPANG_ACCESS_KEY",
-            ["SecretKey"] = "YOUR_COUPANG_SECRET_KEY",
-            ["ApiBaseUrl"] = "https://api-gateway.coupang.com",
-            ["DefaultShippingCompanyCode"] = "CJGLS",
-            ["OrderFetchDays"] = 14,
-            ["FetchStatuses"] = new JArray("ACCEPT", "INSTRUCT")
-        };
-
-        return sample.ToString(Formatting.Indented);
     }
 
     private static string Protect(string value)

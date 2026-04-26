@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Cafe24ShipmentManager.Services;
@@ -24,19 +24,21 @@ internal static class Cafe24SharedTokenStore
         }
 
         var json = JObject.Parse(File.ReadAllText(path));
-        config.MallId = Pick(json, "MallId", config.MallId);
-        config.ClientId = Pick(json, "ClientId", config.ClientId);
-        config.ClientSecret = Pick(json, "ClientSecret", config.ClientSecret);
+        config.MallId = PreferConfigured(config.MallId, json, "MallId");
+        config.ClientId = PreferConfigured(config.ClientId, json, "ClientId");
+        config.ClientSecret = PreferConfigured(config.ClientSecret, json, "ClientSecret");
         config.AccessToken = Pick(json, "AccessToken", config.AccessToken);
         config.RefreshToken = Pick(json, "RefreshToken", config.RefreshToken);
-        config.RedirectUri = Pick(json, "RedirectUri", config.RedirectUri);
+        config.RedirectUri = PreferConfigured(config.RedirectUri, json, "RedirectUri");
+        // Shared token refresh can negotiate a newer per-mall API version.
+        // Keep using that stored value on the next launch unless config overrides it later.
         config.ApiVersion = Pick(json, "ApiVersion", config.ApiVersion);
-        config.ShopNo = Pick(json, "ShopNo", config.ShopNo);
-        config.Scope = Pick(json, "Scope", config.Scope);
+        config.ShopNo = PreferConfigured(config.ShopNo, json, "ShopNo");
+        config.Scope = PreferConfigured(config.Scope, json, "Scope");
         log?.Info($"공유 Cafe24 토큰 파일 로드: {path}");
     }
 
-    public static void Save(Cafe24Config config)
+    public static void Save(Cafe24Config config, bool markTokenRefresh = false)
     {
         var path = ResolvePath(config.TokenFilePath);
         var directory = Path.GetDirectoryName(path);
@@ -45,23 +47,43 @@ internal static class Cafe24SharedTokenStore
             Directory.CreateDirectory(directory);
         }
 
-        var json = new JObject
+        var json = new JObject();
+        if (File.Exists(path))
         {
-            ["MallId"] = config.MallId,
-            ["ClientId"] = config.ClientId,
-            ["ClientSecret"] = config.ClientSecret,
-            ["AccessToken"] = config.AccessToken,
-            ["RefreshToken"] = config.RefreshToken,
-            ["RedirectUri"] = config.RedirectUri,
-            ["ApiVersion"] = config.ApiVersion,
-            ["ShopNo"] = config.ShopNo,
-            ["Scope"] = config.Scope,
-            ["UpdatedAt"] = DateTime.Now.ToString("o")
-        };
+            try
+            {
+                json = JObject.Parse(File.ReadAllText(path));
+            }
+            catch
+            {
+                json = new JObject();
+            }
+        }
+
+        var previousAccessToken = json["AccessToken"]?.ToString();
+        var previousRefreshToken = json["RefreshToken"]?.ToString();
+        var accessTokenChanged = !string.Equals(previousAccessToken, config.AccessToken, StringComparison.Ordinal);
+        var refreshTokenChanged = !string.Equals(previousRefreshToken, config.RefreshToken, StringComparison.Ordinal);
+        var now = DateTime.Now.ToString("o");
+
+        json["MallId"] = config.MallId;
+        json["ClientId"] = config.ClientId;
+        json["ClientSecret"] = config.ClientSecret;
+        json["AccessToken"] = config.AccessToken;
+        json["RefreshToken"] = config.RefreshToken;
+        json["RedirectUri"] = config.RedirectUri;
+        json["ApiVersion"] = config.ApiVersion;
+        json["ShopNo"] = config.ShopNo;
+        json["Scope"] = config.Scope;
+
+        if (markTokenRefresh || accessTokenChanged || string.IsNullOrWhiteSpace(json["UpdatedAt"]?.ToString()))
+            json["UpdatedAt"] = now;
+
+        if (markTokenRefresh || refreshTokenChanged || string.IsNullOrWhiteSpace(json["RefreshTokenUpdatedAt"]?.ToString()))
+            json["RefreshTokenUpdatedAt"] = markTokenRefresh || refreshTokenChanged ? now : json["UpdatedAt"]?.ToString() ?? now;
 
         File.WriteAllText(path, json.ToString(Formatting.Indented));
     }
-
     private static string ResolvePath(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -79,5 +101,12 @@ internal static class Cafe24SharedTokenStore
     {
         var value = json[propertyName]?.ToString();
         return string.IsNullOrWhiteSpace(value) ? fallback : value;
+    }
+
+    private static string PreferConfigured(string configuredValue, JObject json, string propertyName)
+    {
+        return string.IsNullOrWhiteSpace(configuredValue)
+            ? Pick(json, propertyName, configuredValue)
+            : configuredValue;
     }
 }

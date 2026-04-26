@@ -57,8 +57,8 @@ static class Program
 
         if (!userSettingsService.IsAdminUser(currentUser) && !userSettingsService.HasMarketplaceConfiguration(currentUser.Id))
         {
-            MessageBox.Show("이 계정은 아직 마켓 키가 없습니다. 먼저 사용자별 키를 저장하세요.",
-                "키 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show("이 계정에는 아직 연결된 마켓이 없습니다. 로그인 후 마켓명과 JSON 키 파일을 먼저 추가하세요.",
+                "마켓 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
             using var profileForm = new UserProfileForm(currentUser, userSettingsService, requireMarketplaceConfig: true);
             if (profileForm.ShowDialog() != DialogResult.OK)
@@ -75,14 +75,11 @@ static class Program
 
         var marketClients = BuildMarketplaceClients(configPath, effectiveConfig, logger);
         if (marketClients.Count == 0)
-        {
-            MessageBox.Show("활성화된 마켓 API 설정을 찾지 못했습니다. 관리자 또는 현재 로그인 계정의 키 설정을 확인하세요.",
-                "마켓 설정 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
+            logger.Warn("연동 마켓 없음: 사용자 설정에서 JSON/API 키를 추가해야 합니다.");
+        else
+            logger.Info($"연동 마켓: {string.Join(", ", marketClients.Select(client => $"{client.DisplayName}({client.SourceKey})"))}");
 
-        logger.Info($"연동 마켓: {string.Join(", ", marketClients.Select(client => $"{client.DisplayName}({client.SourceKey})"))}");
-        Application.Run(new MainForm(db, logger, marketClients, credentialPath, spreadsheetId, defaultSheetName, currentUser, userSettingsService));
+        Application.Run(new MainForm(db, logger, authService, marketClients, credentialPath, spreadsheetId, defaultSheetName, currentUser, userSettingsService));
     }
 
     private static List<IMarketplaceApiClient> BuildMarketplaceClients(string configPath, JObject config, AppLogger logger)

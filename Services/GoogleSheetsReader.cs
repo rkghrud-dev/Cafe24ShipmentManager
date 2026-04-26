@@ -28,6 +28,10 @@ public class GoogleSheetsReader
         "택배사", "배송사", "운송사", "택배", "배송업체", "운송업체"
     };
 
+    private static readonly string[] TrackingKeywords = {
+        "진열입고산입송장번호", "진열입고산입송장", "송장번호", "운송장번호", "운송장", "송장"
+    };
+
     private static readonly Regex DateMarkerPattern = new(@"^20\d{2}\.\d{1,2}\.\d{1,2}$", RegexOptions.Compiled);
 
 
@@ -303,6 +307,8 @@ public class GoogleSheetsReader
             }
         }
 
+        var trackingColumnIndex = DetectTrackingColumn(result.Headers);
+
         var vendorSet = new HashSet<string>();
 
         for (int row = headerRowIndex + 1; row < values.Count; row++)
@@ -313,7 +319,7 @@ public class GoogleSheetsReader
             var vendor = GetCell(2); // C열
             if (string.IsNullOrEmpty(vendor)) continue;
 
-            var tracking = GetCell(11);        // L열: 송장번호
+            var tracking = GetCell(trackingColumnIndex >= 0 ? trackingColumnIndex : 11); // L열 기본, cj발주서 진열입고산입 송장번호 우선
             var productCode = GetCell(1);       // B열: 상품코드
             var orderDate = GetCell(3);          // D열: 발주일
             var recipientName = GetCell(5);     // F열: 수령인명
@@ -374,6 +380,7 @@ public class GoogleSheetsReader
         var headerRow = rows[headerRowIndex];
         var phoneColumnIndex = DetectPhoneColumn(headerRow);
         var shippingCompanyColumnIndex = DetectShippingCompanyColumn(headerRow);
+        var trackingColumnIndex = DetectTrackingColumn(headerRow);
         var pendingWindow = DetectPendingWindow(rows, headerRowIndex);
 
         result.PreviousDateLabel = pendingWindow.PreviousDateLabel;
@@ -398,7 +405,7 @@ public class GoogleSheetsReader
             if (string.IsNullOrWhiteSpace(vendor))
                 continue;
 
-            var tracking = NormalizeTracking(GetCell(11));
+            var tracking = NormalizeTracking(GetCell(trackingColumnIndex >= 0 ? trackingColumnIndex : 11));
             var recipientName = GetCell(5);
             var phone = phoneColumnIndex >= 0 ? GetCell(phoneColumnIndex) : GetCell(6);
             var shippingCompany = shippingCompanyColumnIndex >= 0 ? GetCell(shippingCompanyColumnIndex) : "";
@@ -474,6 +481,18 @@ public class GoogleSheetsReader
         }
 
         return -1;
+    }
+
+    private static int DetectTrackingColumn(IReadOnlyList<string> headers)
+    {
+        for (int index = 0; index < headers.Count; index++)
+        {
+            var normalized = NormalizeHeader(headers[index]);
+            if (TrackingKeywords.Any(keyword => normalized.Contains(NormalizeHeader(keyword), StringComparison.OrdinalIgnoreCase)))
+                return index;
+        }
+
+        return headers.Count > 11 ? 11 : -1;
     }
 
     private static PendingShipmentWindow DetectPendingWindow(List<List<string>> rows, int headerRowIndex)

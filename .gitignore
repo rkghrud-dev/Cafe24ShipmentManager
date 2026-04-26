@@ -10,3 +10,6 @@ cafe24_token.txt
 .vs/
 __pycache__/
 *.bak
+dist/
+installer/out/
+installer/SetupBootstrapper/Payload/

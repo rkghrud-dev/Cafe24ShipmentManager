@@ -19,11 +19,16 @@ public partial class MainForm
     private Label? _lblOrderSelectionEx;
     private ComboBox? _cboOrderExportMarketEx;
     private DateTimePicker? _dtpOrderExportDateEx;
+    private CheckBox? _chkOrderExportSupplierProductEx;
+    private CheckBox? _chkOrderExportOptionEx;
+    private Label? _lblOrderExportMarketColumnEx;
+    private Label? _lblOrderExportDateColumnEx;
     private Label? _lblOrderExportSummaryEx;
     private ContextMenuStrip? _menuOrderExportEx;
     private ToolStripMenuItem? _itemOrderExportCopyEx;
     private ToolStripMenuItem? _itemOrderExportSaveEx;
     private bool _orderExportUiInitializedEx;
+    private bool _orderExportDateDropdownOpenEx;
     private readonly Dictionary<string, string> _orderProgressStateByKeyEx = new(StringComparer.OrdinalIgnoreCase);
 
     private void EnsureOrderExportUi()
@@ -138,6 +143,30 @@ public partial class MainForm
             CustomFormat = "yyyy-MM-dd",
             Value = DateTime.Today
         };
+        _chkOrderExportSupplierProductEx = new CheckBox
+        {
+            AutoSize = true,
+            Text = "공급사상품명",
+            Margin = new Padding(0, 4, 12, 0)
+        };
+        _chkOrderExportOptionEx = new CheckBox
+        {
+            AutoSize = true,
+            Text = "옵션",
+            Margin = new Padding(0, 4, 0, 0)
+        };
+        var optionalColumnsPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            WrapContents = false
+        };
+        optionalColumnsPanel.Controls.AddRange(new Control[] { _chkOrderExportSupplierProductEx, _chkOrderExportOptionEx });
+
+        _lblOrderExportMarketColumnEx = new Label { AutoSize = true, Text = "B열 마켓명:", Margin = new Padding(0, 6, 8, 4) };
+        _lblOrderExportDateColumnEx = new Label { AutoSize = true, Text = "C열 날짜:", Margin = new Padding(0, 8, 8, 4) };
 
         _lblOrderExportSummaryEx = new Label
         {
@@ -149,22 +178,42 @@ public partial class MainForm
 
         _cboOrderExportMarketEx.TextChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
         _dtpOrderExportDateEx.ValueChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
+        _dtpOrderExportDateEx.DropDown += (_, _) =>
+        {
+            _orderExportDateDropdownOpenEx = true;
+            if (_menuOrderExportEx != null)
+                _menuOrderExportEx.AutoClose = false;
+        };
+        _dtpOrderExportDateEx.CloseUp += (_, _) =>
+        {
+            _orderExportDateDropdownOpenEx = false;
+            BeginInvoke(new Action(() =>
+            {
+                if (_menuOrderExportEx != null)
+                    _menuOrderExportEx.AutoClose = true;
+            }));
+            RefreshOrderExportPopupSummaryEx();
+        };
+        _chkOrderExportSupplierProductEx.CheckedChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
+        _chkOrderExportOptionEx.CheckedChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
 
         var contentPanel = new TableLayoutPanel
         {
             AutoSize = true,
             ColumnCount = 2,
-            RowCount = 3,
+            RowCount = 4,
             Padding = new Padding(10),
             Margin = Padding.Empty
         };
         contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         contentPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        contentPanel.Controls.Add(new Label { AutoSize = true, Text = "B열 마켓명:", Margin = new Padding(0, 6, 8, 4) }, 0, 0);
-        contentPanel.Controls.Add(_cboOrderExportMarketEx, 1, 0);
-        contentPanel.Controls.Add(new Label { AutoSize = true, Text = "C열 날짜:", Margin = new Padding(0, 8, 8, 4) }, 0, 1);
-        contentPanel.Controls.Add(_dtpOrderExportDateEx, 1, 1);
-        contentPanel.Controls.Add(_lblOrderExportSummaryEx, 0, 2);
+        contentPanel.Controls.Add(new Label { AutoSize = true, Text = "앞열 추가:", Margin = new Padding(0, 6, 8, 4) }, 0, 0);
+        contentPanel.Controls.Add(optionalColumnsPanel, 1, 0);
+        contentPanel.Controls.Add(_lblOrderExportMarketColumnEx, 0, 1);
+        contentPanel.Controls.Add(_cboOrderExportMarketEx, 1, 1);
+        contentPanel.Controls.Add(_lblOrderExportDateColumnEx, 0, 2);
+        contentPanel.Controls.Add(_dtpOrderExportDateEx, 1, 2);
+        contentPanel.Controls.Add(_lblOrderExportSummaryEx, 0, 3);
         contentPanel.SetColumnSpan(_lblOrderExportSummaryEx, 2);
 
         var host = new ToolStripControlHost(contentPanel)
@@ -177,13 +226,27 @@ public partial class MainForm
 
         _itemOrderExportCopyEx = new ToolStripMenuItem("클립보드 복사");
         _itemOrderExportSaveEx = new ToolStripMenuItem("엑셀 저장");
-        _itemOrderExportCopyEx.Click += (_, _) => CopySelectedOrdersToClipboardEx();
-        _itemOrderExportSaveEx.Click += (_, _) => SaveSelectedOrdersWorkbookEx();
+        _itemOrderExportCopyEx.Click += (_, _) =>
+        {
+            _menuOrderExportEx?.Close();
+            CopySelectedOrdersToClipboardEx();
+        };
+        _itemOrderExportSaveEx.Click += (_, _) =>
+        {
+            _menuOrderExportEx?.Close();
+            SaveSelectedOrdersWorkbookEx();
+        };
 
         _menuOrderExportEx = new ContextMenuStrip
         {
             ShowImageMargin = false,
-            ShowCheckMargin = false
+            ShowCheckMargin = false,
+            AutoClose = true
+        };
+        _menuOrderExportEx.Closing += (_, e) =>
+        {
+            if (_orderExportDateDropdownOpenEx)
+                e.Cancel = true;
         };
         _menuOrderExportEx.Items.Add(host);
         _menuOrderExportEx.Items.Add(new ToolStripSeparator());
@@ -385,6 +448,7 @@ public partial class MainForm
 
     private void RefreshOrderExportPopupSummaryEx(IReadOnlyCollection<Cafe24Order>? selectedOrders = null)
     {
+        RefreshOrderExportColumnLabelsEx();
         if (_lblOrderExportSummaryEx == null) return;
 
         var orders = selectedOrders ?? GetCheckedPreviewOrdersEx();
@@ -399,10 +463,35 @@ public partial class MainForm
         var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
         var validCount = rows.Count(row => !string.IsNullOrWhiteSpace(row.ProductCode));
         var missingCount = rows.Count - validCount;
-        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건\n빈칸 건은 맨 위로 복사됩니다.";
+        var extraColumnCount = CurrentOrderExportLeadingColumnCountEx;
+        var extraSummary = extraColumnCount > 0 ? $" / 앞열 추가 {extraColumnCount}칸" : "";
+        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건{extraSummary}\n빈칸 건은 맨 위로 복사됩니다.";
 
         if (_itemOrderExportCopyEx != null) _itemOrderExportCopyEx.Enabled = true;
         if (_itemOrderExportSaveEx != null) _itemOrderExportSaveEx.Enabled = true;
+    }
+
+    private void RefreshOrderExportColumnLabelsEx()
+    {
+        var leadingColumns = CurrentOrderExportLeadingColumnCountEx;
+        if (_lblOrderExportMarketColumnEx != null)
+            _lblOrderExportMarketColumnEx.Text = $"{ToExcelColumnNameEx(2 + leadingColumns)}열 마켓명:";
+        if (_lblOrderExportDateColumnEx != null)
+            _lblOrderExportDateColumnEx.Text = $"{ToExcelColumnNameEx(3 + leadingColumns)}열 날짜:";
+    }
+
+    private static string ToExcelColumnNameEx(int oneBasedColumn)
+    {
+        var dividend = Math.Max(1, oneBasedColumn);
+        var columnName = "";
+        while (dividend > 0)
+        {
+            var modulo = (dividend - 1) % 26;
+            columnName = Convert.ToChar('A' + modulo) + columnName;
+            dividend = (dividend - modulo) / 26;
+        }
+
+        return columnName;
     }
 
     private void CopySelectedOrdersToClipboardEx()
@@ -415,7 +504,10 @@ public partial class MainForm
         }
 
         var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
-        var clipboardText = ShipmentRequestOrderExportFormatterEx.BuildClipboardText(rows);
+        var clipboardText = ShipmentRequestOrderExportFormatterEx.BuildClipboardText(
+            rows,
+            CurrentOrderExportIncludeSupplierProductEx,
+            CurrentOrderExportIncludeOptionEx);
 
         try
         {
@@ -469,7 +561,13 @@ public partial class MainForm
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        ShipmentRequestOrderExportFormatterEx.SaveAsWorkbook(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx, dialog.FileName);
+        ShipmentRequestOrderExportFormatterEx.SaveAsWorkbook(
+            orders,
+            CurrentOrderExportMarketNameEx,
+            CurrentOrderExportDateTextEx,
+            dialog.FileName,
+            CurrentOrderExportIncludeSupplierProductEx,
+            CurrentOrderExportIncludeOptionEx);
 
         string? historyError = null;
         try
@@ -536,9 +634,19 @@ public partial class MainForm
     private DateTime CurrentOrderExportDateValueEx => _dtpOrderExportDateEx?.Value ?? DateTime.Today;
 
     private string CurrentOrderExportDateTextEx => CurrentOrderExportDateValueEx.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+    private bool CurrentOrderExportIncludeSupplierProductEx => _chkOrderExportSupplierProductEx?.Checked == true;
+
+    private bool CurrentOrderExportIncludeOptionEx => _chkOrderExportOptionEx?.Checked == true;
+
+    private int CurrentOrderExportLeadingColumnCountEx =>
+        (CurrentOrderExportIncludeSupplierProductEx ? 1 : 0) +
+        (CurrentOrderExportIncludeOptionEx ? 1 : 0);
 }
 internal sealed class ShipmentRequestOrderRowEx
 {
+    public string SupplierProductName { get; init; } = string.Empty;
+    public string ProductOption { get; init; } = string.Empty;
     public string ProductCode { get; init; } = string.Empty;
     public string MarketName { get; init; } = string.Empty;
     public string ExportDate { get; init; } = string.Empty;
@@ -555,7 +663,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
 {
     public const string DefaultMarketName = "홈런마켓";
 
-    private static readonly string[] Headers =
+    private const string SupplierProductHeader = "공급사상품명";
+    private const string ProductOptionHeader = "옵션";
+
+    private static readonly string[] BaseHeaders =
     {
         "공급사 상품명(매입상품명)",
         "상품옵션",
@@ -571,7 +682,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private const string DefaultOptionLetter = "A";
     private static readonly Regex AssignedOptionLetterRegex = new("=\\s*([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
-    private static readonly Regex StandaloneOptionLetterRegex = new("(?<![A-Za-z])([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
+    private static readonly Regex StandaloneOptionLetterRegex = new("(?<![A-Za-z0-9])([A-Za-z])(?![A-Za-z0-9])", RegexOptions.Compiled);
     private static readonly Regex ProductCodeRegex = new("\\b([A-Z]{2,}\\d+[A-Z])\\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static DateTime ResolveDefaultDate(IEnumerable<Cafe24Order> orders)
@@ -593,23 +704,35 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return blankRows.Concat(normalRows).ToList();
     }
 
-    public static string BuildPreview(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    public static string BuildPreview(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeSupplierProduct = false,
+        bool includeOption = false)
     {
-        return BuildDelimitedText(rows, includeHeaders: true);
+        return BuildDelimitedText(rows, true, includeSupplierProduct, includeOption);
     }
 
-    public static string BuildClipboardText(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    public static string BuildClipboardText(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeSupplierProduct = false,
+        bool includeOption = false)
     {
-        return BuildDelimitedText(rows, includeHeaders: false);
+        return BuildDelimitedText(rows, false, includeSupplierProduct, includeOption);
     }
 
-    public static void SaveAsWorkbook(IEnumerable<Cafe24Order> orders, string marketName, string orderDateText, string filePath)
+    public static void SaveAsWorkbook(
+        IEnumerable<Cafe24Order> orders,
+        string marketName,
+        string orderDateText,
+        string filePath,
+        bool includeSupplierProduct = false,
+        bool includeOption = false)
     {
         var rows = BuildRows(orders, marketName, orderDateText).ToList();
 
         using var workbook = new XLWorkbook();
         var sheet = workbook.Worksheets.Add("Sheet1");
-        WriteWorksheet(sheet, rows);
+        WriteWorksheet(sheet, rows, includeSupplierProduct, includeOption);
         workbook.SaveAs(filePath);
     }
 
@@ -622,21 +745,42 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return null;
     }
 
-    private static string BuildDelimitedText(IReadOnlyList<ShipmentRequestOrderRowEx> rows, bool includeHeaders)
+    private static string BuildDelimitedText(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeHeaders,
+        bool includeSupplierProduct,
+        bool includeOption)
     {
         var sb = new StringBuilder();
         if (includeHeaders)
-            sb.AppendLine(string.Join("\t", Headers));
+            sb.AppendLine(string.Join("\t", BuildHeaders(includeSupplierProduct, includeOption)));
 
         foreach (var row in rows)
-            sb.AppendLine(string.Join("\t", BuildValues(row)));
+            sb.AppendLine(string.Join("\t", BuildValues(row, includeSupplierProduct, includeOption)));
 
         return sb.ToString().TrimEnd('\r', '\n');
     }
 
-    private static string[] BuildValues(ShipmentRequestOrderRowEx row)
+    private static string[] BuildHeaders(bool includeSupplierProduct, bool includeOption)
     {
-        return new[]
+        var values = new List<string>();
+        if (includeSupplierProduct)
+            values.Add(SupplierProductHeader);
+        if (includeOption)
+            values.Add(ProductOptionHeader);
+        values.AddRange(BaseHeaders);
+        return values.ToArray();
+    }
+
+    private static string[] BuildValues(ShipmentRequestOrderRowEx row, bool includeSupplierProduct, bool includeOption)
+    {
+        var values = new List<string>();
+        if (includeSupplierProduct)
+            values.Add(Clean(row.SupplierProductName));
+        if (includeOption)
+            values.Add(Clean(row.ProductOption));
+
+        values.AddRange(new[]
         {
             Clean(row.ProductCode),
             Clean(row.MarketName),
@@ -648,7 +792,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
             Clean(row.FullAddress),
             Clean(row.ShippingMessage),
             Clean(row.DetailAddress)
-        };
+        });
+
+        return values.ToArray();
     }
 
     private static ShipmentRequestOrderRowEx BuildRow(Cafe24Order order, string marketName, string orderDateText)
@@ -660,6 +806,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var receiver = SelectReceiver(orderJson, order);
         var item = SelectItem(orderJson, order);
 
+        var supplierProductName = ResolveSupplierProductName(item, order);
         var optionText = ResolveOptionText(item);
         var baseProductCode = ResolveBaseProductCode(item, order);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
@@ -672,6 +819,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
         return new ShipmentRequestOrderRowEx
         {
+            SupplierProductName = supplierProductName,
+            ProductOption = optionText,
             ProductCode = finalProductCode,
             MarketName = marketName,
             ExportDate = orderDateText,
@@ -694,6 +843,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var optionText = item?["sellerProductItemName"]?.ToString()
                          ?? item?["vendorItemName"]?.ToString()
                          ?? string.Empty;
+        var supplierProductName = item?["sellerProductName"]?.ToString()
+                                  ?? item?["vendorItemName"]?.ToString()
+                                  ?? order.ProductName;
         var baseProductCode = ResolveCoupangProductCode(item, order);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
 
@@ -709,6 +861,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
         return new ShipmentRequestOrderRowEx
         {
+            SupplierProductName = supplierProductName,
+            ProductOption = optionText,
             ProductCode = finalProductCode,
             MarketName = marketName,
             ExportDate = orderDateText,
@@ -829,6 +983,22 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return string.Join(" / ", parts);
     }
 
+    private static string ResolveSupplierProductName(JObject? item, Cafe24Order order)
+    {
+        foreach (var candidate in new[]
+        {
+            item?["supplier_product_name"]?.ToString(),
+            item?["product_name"]?.ToString(),
+            order.ProductName
+        })
+        {
+            if (!string.IsNullOrWhiteSpace(candidate))
+                return candidate.Trim();
+        }
+
+        return string.Empty;
+    }
+
     private static string ResolveBaseProductCode(JObject? item, Cafe24Order order)
     {
         var customProductCode = item?["custom_product_code"]?.ToString();
@@ -878,8 +1048,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
         if (assignedMatch.Success)
             return assignedMatch.Groups[1].Value.ToUpperInvariant();
 
-        var standaloneMatch = StandaloneOptionLetterRegex.Match(optionText);
-        return standaloneMatch.Success ? standaloneMatch.Groups[1].Value.ToUpperInvariant() : null;
+        var standaloneMatches = StandaloneOptionLetterRegex.Matches(optionText);
+        return standaloneMatches.Count > 0
+            ? standaloneMatches[^1].Groups[1].Value.ToUpperInvariant()
+            : null;
     }
 
     private static string ResolveRecipientPhone(JObject? receiver, Cafe24Order order)
@@ -904,10 +1076,15 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return Clean(addressFull);
     }
 
-    private static void WriteWorksheet(IXLWorksheet sheet, IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    private static void WriteWorksheet(
+        IXLWorksheet sheet,
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeSupplierProduct,
+        bool includeOption)
     {
-        for (int col = 0; col < Headers.Length; col++)
-            sheet.Cell(1, col + 1).Value = Headers[col];
+        var headers = BuildHeaders(includeSupplierProduct, includeOption);
+        for (int col = 0; col < headers.Length; col++)
+            sheet.Cell(1, col + 1).Value = headers[col];
 
         var blankCount = 0;
         for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
@@ -916,24 +1093,30 @@ internal static class ShipmentRequestOrderExportFormatterEx
             var excelRow = rowIndex + 2;
             if (string.IsNullOrWhiteSpace(row.ProductCode)) blankCount++;
 
-            sheet.Cell(excelRow, 1).Value = row.ProductCode;
-            sheet.Cell(excelRow, 2).Value = row.MarketName;
-            sheet.Cell(excelRow, 3).Value = row.ExportDate;
-            sheet.Cell(excelRow, 4).Value = row.Quantity;
-            sheet.Cell(excelRow, 5).Value = row.RecipientName;
-            sheet.Cell(excelRow, 6).Value = row.RecipientPhone;
+            var col = 1;
+            if (includeSupplierProduct)
+                sheet.Cell(excelRow, col++).Value = row.SupplierProductName;
+            if (includeOption)
+                sheet.Cell(excelRow, col++).Value = row.ProductOption;
+
+            sheet.Cell(excelRow, col++).Value = row.ProductCode;
+            sheet.Cell(excelRow, col++).Value = row.MarketName;
+            sheet.Cell(excelRow, col++).Value = row.ExportDate;
+            sheet.Cell(excelRow, col++).Value = row.Quantity;
+            sheet.Cell(excelRow, col++).Value = row.RecipientName;
+            sheet.Cell(excelRow, col++).Value = row.RecipientPhone;
             if (int.TryParse(row.PostalCode, out var zipcode))
-                sheet.Cell(excelRow, 7).Value = zipcode;
+                sheet.Cell(excelRow, col++).Value = zipcode;
             else
-                sheet.Cell(excelRow, 7).Value = row.PostalCode;
-            sheet.Cell(excelRow, 8).Value = row.FullAddress;
-            sheet.Cell(excelRow, 9).Value = string.IsNullOrWhiteSpace(row.ShippingMessage) ? null : row.ShippingMessage;
-            sheet.Cell(excelRow, 10).Value = row.DetailAddress;
+                sheet.Cell(excelRow, col++).Value = row.PostalCode;
+            sheet.Cell(excelRow, col++).Value = row.FullAddress;
+            sheet.Cell(excelRow, col++).Value = string.IsNullOrWhiteSpace(row.ShippingMessage) ? null : row.ShippingMessage;
+            sheet.Cell(excelRow, col).Value = row.DetailAddress;
         }
 
         if (blankCount > 0)
         {
-            var blankRange = sheet.Range(2, 1, blankCount + 1, Headers.Length);
+            var blankRange = sheet.Range(2, 1, blankCount + 1, headers.Length);
             blankRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9D9D9");
         }
 
