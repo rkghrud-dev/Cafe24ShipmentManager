@@ -20,11 +20,14 @@ import android.os.Bundle;
 
 import android.provider.OpenableColumns;
 
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.graphics.Typeface;
 
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
 
 import android.widget.AdapterView;
 
@@ -51,6 +54,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatDelegate;
 
 import androidx.appcompat.widget.AppCompatImageButton;
 
@@ -145,6 +149,12 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    public static final String EXTRA_MARKET_FILTER = "com.rkghrud.shipapp.extra.MARKET_FILTER";
+
+    public static final String EXTRA_REFRESH_ON_OPEN = "com.rkghrud.shipapp.extra.REFRESH_ON_OPEN";
+
+    public static final String MARKET_FILTER_ALL = "all";
+
     private static final int STATUS_OFFLINE = 0;
 
     private static final int STATUS_ONLINE = 1;
@@ -153,7 +163,7 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-    private static final String FILTER_ALL = "all";
+    private static final String FILTER_ALL = MARKET_FILTER_ALL;
 
     private static final String COUPANG_KEY = "coupang";
 
@@ -287,6 +297,10 @@ public class MainActivity extends AppCompatActivity {
 
     protected void onCreate(@Nullable Bundle savedInstanceState) {
 
+        AppCompatDelegate.setDefaultNightMode(AlertPrefs.isDarkModeEnabled(this)
+                ? AppCompatDelegate.MODE_NIGHT_YES
+                : AppCompatDelegate.MODE_NIGHT_NO);
+
         super.onCreate(savedInstanceState);
 
         setContentView(R.layout.activity_main);
@@ -372,9 +386,9 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-        marketAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, new ArrayList<>());
+        marketAdapter = new ArrayAdapter<>(this, R.layout.item_compact_spinner, new ArrayList<>());
 
-        marketAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        marketAdapter.setDropDownViewResource(R.layout.item_compact_spinner_dropdown);
 
         marketFilterSpinner.setAdapter(marketAdapter);
 
@@ -384,9 +398,9 @@ public class MainActivity extends AppCompatActivity {
 
         ArrayAdapter<String> pageAdapter = new ArrayAdapter<>(this,
 
-                android.R.layout.simple_spinner_item, PAGE_SIZE_LABELS);
+                R.layout.item_compact_spinner, PAGE_SIZE_LABELS);
 
-        pageAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        pageAdapter.setDropDownViewResource(R.layout.item_compact_spinner_dropdown);
 
         pageSizeSpinner.setAdapter(pageAdapter);
 
@@ -441,7 +455,7 @@ public class MainActivity extends AppCompatActivity {
 
         importSpreadsheetButton.setOnClickListener(v -> launchSpreadsheetImport());
 
-        standbyPageButton.setOnClickListener(v -> openStandbyPage());
+        standbyPageButton.setOnClickListener(v -> confirmStandbySelected());
 
         uploadSelectedButton.setOnClickListener(v -> confirmUploadSelected());
 
@@ -449,11 +463,22 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-        maybeAutoLoadDebugSeeds();
-
         showCredentialOnlyStatus();
 
+        handleWidgetIntent(getIntent(), false);
+
         refreshOrders();
+
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+
+        super.onNewIntent(intent);
+
+        setIntent(intent);
+
+        handleWidgetIntent(intent, true);
 
     }
 
@@ -608,6 +633,10 @@ public class MainActivity extends AppCompatActivity {
 
         applyFilters();
 
+        NotificationHelper.saveWidgetDataFromDispatchOrders(this, result.orders, result.totalCount);
+
+        NotificationHelper.updateWidget(this);
+
         setLoading(false);
 
 
@@ -682,27 +711,13 @@ public class MainActivity extends AppCompatActivity {
 
         totalCountView.setText(String.valueOf(currentTotalCount));
 
-        if (currentMarketCountSummary.isEmpty()) {
-            marketCountSummaryView.setVisibility(View.GONE);
-            marketCountSummaryView.setText("");
-        } else {
-            marketCountSummaryView.setVisibility(View.VISIBLE);
-            marketCountSummaryView.setText(currentMarketCountSummary);
-        }
+        marketCountSummaryView.setVisibility(View.GONE);
+        marketCountSummaryView.setText("");
 
 
 
-        if (currentTotalCount > 0) {
-
-            pendingBadgeView.setVisibility(View.VISIBLE);
-
-            pendingBadgeView.setText("! " + currentTotalCount);
-
-        } else {
-
-            pendingBadgeView.setVisibility(View.GONE);
-
-        }
+        pendingBadgeView.setVisibility(View.GONE);
+        pendingBadgeView.setText("");
 
 
 
@@ -735,6 +750,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         aggregateStatusView.setContentDescription(buildSettingsSummary());
+        aggregateStatusView.setVisibility(View.GONE);
 
     }
 
@@ -814,7 +830,7 @@ public class MainActivity extends AppCompatActivity {
 
         marketFilterKeys.clear();
 
-        marketFilterLabels.add("전체보기");
+        marketFilterLabels.add("전체");
 
         marketFilterKeys.add(FILTER_ALL);
 
@@ -852,6 +868,52 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private void handleWidgetIntent(@Nullable Intent intent, boolean allowRefresh) {
+
+        if (intent == null) {
+
+            return;
+
+        }
+
+        String marketKey = safeText(intent.getStringExtra(EXTRA_MARKET_FILTER));
+
+        if (!marketKey.isEmpty()) {
+
+            selectMarketFilter(marketKey);
+
+        }
+
+        if (allowRefresh && intent.getBooleanExtra(EXTRA_REFRESH_ON_OPEN, false)) {
+
+            refreshOrders();
+
+        }
+
+    }
+
+    private void selectMarketFilter(String marketKey) {
+
+        if (marketFilterSpinner == null || marketKey.isEmpty()) {
+
+            return;
+
+        }
+
+        int selectedIndex = marketFilterKeys.indexOf(marketKey);
+
+        if (selectedIndex < 0) {
+
+            return;
+
+        }
+
+        marketFilterSpinner.setSelection(selectedIndex, false);
+
+        applyFilters(true);
+
+    }
+
 
 
     private void applyFilters() {
@@ -879,6 +941,7 @@ public class MainActivity extends AppCompatActivity {
 
         filteredOrders.sort(DispatchOrder.displayComparator());
         currentFilteredCount = filteredOrders.size();
+        totalCountView.setText(String.valueOf(currentFilteredCount));
 
         int totalPages = getTotalPageCount();
         if (totalPages == 0) {
@@ -1199,7 +1262,8 @@ public class MainActivity extends AppCompatActivity {
         selectAllCheckBox.setEnabled(!swipeRefreshLayout.isRefreshing() && selectableCount > 0);
         uploadSelectedButton.setEnabled(!swipeRefreshLayout.isRefreshing() && readyCount > 0);
         importSpreadsheetButton.setEnabled(!swipeRefreshLayout.isRefreshing() && !allOrders.isEmpty());
-        standbyPageButton.setEnabled(!swipeRefreshLayout.isRefreshing() && hasOpenableCafe24StandbyPage());
+        standbyPageButton.setText(readyCount > 0 ? "대기매칭 " + readyCount + "건" : "대기매칭");
+        standbyPageButton.setEnabled(!swipeRefreshLayout.isRefreshing() && readyCount > 0);
     }
 
 
@@ -1360,63 +1424,15 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-    private boolean hasOpenableCafe24StandbyPage() {
+    private void confirmStandbySelected() {
 
-        return !credentialStore.getActiveCafe24Markets().isEmpty();
+        List<DispatchOrder> targets = getReadyOrders();
 
-    }
+        if (targets.isEmpty()) {
 
-
-
-    private void openStandbyPage() {
-
-        List<Cafe24MarketConfig> activeMarkets = credentialStore.getActiveCafe24Markets();
-
-        if (activeMarkets.isEmpty()) {
-
-            showToast("연결된 Cafe24 판매처가 없습니다.");
+            showToast("체크된 주문 중 대기매칭 가능한 상태와 송장번호가 있는 항목이 없습니다.");
 
             return;
-
-        }
-
-
-
-        String selectedKey = getSelectedMarketFilter();
-
-        if (!FILTER_ALL.equals(selectedKey)) {
-
-            Cafe24MarketConfig selectedMarket = credentialStore.getCafe24Market(selectedKey);
-
-            if (selectedMarket != null && selectedMarket.hasJson()) {
-
-                openStandbyPageForMarket(selectedMarket);
-
-                return;
-
-            }
-
-        }
-
-
-
-        if (activeMarkets.size() == 1) {
-
-            openStandbyPageForMarket(activeMarkets.get(0));
-
-            return;
-
-        }
-
-
-
-        CharSequence[] labels = new CharSequence[activeMarkets.size()];
-
-        for (int i = 0; i < activeMarkets.size(); i++) {
-
-            String displayName = activeMarkets.get(i).displayName;
-
-            labels[i] = displayName.isEmpty() ? "판매처 " + (i + 1) : displayName;
 
         }
 
@@ -1424,118 +1440,16 @@ public class MainActivity extends AppCompatActivity {
 
         new MaterialAlertDialogBuilder(this)
 
-                .setTitle("송장대기 페이지 판매처 선택")
+                .setTitle("대기매칭")
 
-                .setItems(labels, (dialog, which) -> openStandbyPageForMarket(activeMarkets.get(which)))
+                .setMessage(targets.size() + "건을 Cafe24 송장대기 상태로 등록합니다. 계속하시겠습니까?")
+
+                .setNegativeButton("취소", null)
+
+                .setPositiveButton("대기매칭", (dialog, which) -> standbySelectedOrders(targets))
 
                 .show();
 
-    }
-
-
-
-    private void openStandbyPageForMarket(Cafe24MarketConfig config) {
-
-        try {
-
-            JSONObject json = new JSONObject(credentialStore.getCafe24Json(config.key));
-
-            String mallId = json.optString("MallId", "").trim();
-
-            if (mallId.isEmpty()) {
-
-                showToast("MallId가 없는 판매처입니다.");
-
-                return;
-
-            }
-
-
-
-            LocalDate endDate = LocalDate.now(SEOUL);
-
-            LocalDate startDate = endDate.minusMonths(1);
-
-            Uri standbyUri = buildCafe24StandbyUri(mallId, startDate, endDate);
-
-            Intent intent = new Intent(Intent.ACTION_VIEW, standbyUri);
-
-            intent.addCategory(Intent.CATEGORY_BROWSABLE);
-
-            startActivity(intent);
-
-        } catch (Exception ex) {
-
-            showToast("송장대기 페이지를 열지 못했습니다: " + clipMessage(ex.getMessage()));
-
-        }
-
-    }
-
-
-
-    private Uri buildCafe24StandbyUri(String mallId, LocalDate startDate, LocalDate endDate) {
-        Uri.Builder builder = new Uri.Builder()
-                .scheme("https")
-                .authority(mallId + ".cafe24.com")
-                .path("/admin/php/shop1/s_new/shipped_standby_list_ord_num.php")
-                .appendQueryParameter("rows", "20")
-                .appendQueryParameter("btnDate", "9999")
-                .appendQueryParameter("searchSorting", "order_desc")
-                .appendQueryParameter("MSK[]", "order_id")
-                .appendQueryParameter("MSV[]", "")
-                .appendQueryParameter("order_id", "Array")
-                .appendQueryParameter("date_type", "order_date")
-                .appendQueryParameter("find_option", "product_code")
-                .appendQueryParameter("order_product_name", "")
-                .appendQueryParameter("order_product_code", "")
-                .appendQueryParameter("payed", "")
-                .appendQueryParameter("payed_sql_version", "")
-                .appendQueryParameter("bank_info", "")
-                .appendQueryParameter("memberType", "1")
-                .appendQueryParameter("group_no", "")
-                .appendQueryParameter("isMemAuth", "")
-                .appendQueryParameter("shipment_type", "all")
-                .appendQueryParameter("bunch", "")
-                .appendQueryParameter("shipmentMessage", "")
-                .appendQueryParameter("paystandard", "choice")
-                .appendQueryParameter("product_total_price1", "")
-                .appendQueryParameter("product_total_price2", "")
-                .appendQueryParameter("item_count", "all")
-                .appendQueryParameter("mkSaleType", "M")
-                .appendQueryParameter("mkSaleTypeChg", "")
-                .appendQueryParameter("paymentMethod", "")
-                .appendQueryParameter("is_eguarantee", "")
-                .appendQueryParameter("fPaymentMethod", "")
-                .appendQueryParameter("discountMethod", "")
-                .appendQueryParameter("shop_no_order", "1")
-                .appendQueryParameter("delvReady", "")
-                .appendQueryParameter("delvCancel", "")
-                .appendQueryParameter("orderStatusPayment", "")
-                .appendQueryParameter("orderStatusNotPayCancel", "")
-                .appendQueryParameter("orderStatusCancel", "")
-                .appendQueryParameter("orderSearchCancelStatus", "")
-                .appendQueryParameter("orderStatusExchange", "")
-                .appendQueryParameter("orderSearchExchangeStatus", "")
-                .appendQueryParameter("orderStatusReturn", "")
-                .appendQueryParameter("orderStatusRefund", "")
-                .appendQueryParameter("orderSearchRefundStatus", "")
-                .appendQueryParameter("orderSearchShipStatus", "")
-                .appendQueryParameter("orderStatus", "")
-                .appendQueryParameter("RefundType", "")
-                .appendQueryParameter("incoming", "T")
-                .appendQueryParameter("realclick", "T")
-                .appendQueryParameter("year1", String.format(Locale.US, "%04d", startDate.getYear()))
-                .appendQueryParameter("month1", String.format(Locale.US, "%02d", startDate.getMonthValue()))
-                .appendQueryParameter("day1", String.format(Locale.US, "%02d", startDate.getDayOfMonth()))
-                .appendQueryParameter("year2", String.format(Locale.US, "%04d", endDate.getYear()))
-                .appendQueryParameter("month2", String.format(Locale.US, "%02d", endDate.getMonthValue()))
-                .appendQueryParameter("day2", String.format(Locale.US, "%02d", endDate.getDayOfMonth()))
-                .appendQueryParameter("start_date", startDate.toString())
-                .appendQueryParameter("end_date", endDate.toString())
-                .appendQueryParameter("start_time", "00:00")
-                .appendQueryParameter("end_time", "23:59");
-        return builder.build();
     }
 
 
@@ -1726,6 +1640,8 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+        configureAppearanceSettings(dialogView, dialog);
+
         populateCafe24MarketRows(marketContainer, dialog);
 
 
@@ -1764,6 +1680,80 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private void configureAppearanceSettings(View dialogView, @Nullable AlertDialog dialog) {
+
+        SwitchCompat switchDarkMode = dialogView.findViewById(R.id.switchDarkMode);
+
+        switchDarkMode.setChecked(AlertPrefs.isDarkModeEnabled(this));
+
+        switchDarkMode.setOnCheckedChangeListener((button, checked) -> {
+
+            AlertPrefs.prefs(this).edit().putBoolean(AlertPrefs.KEY_DARK_MODE, checked).apply();
+
+            if (dialog != null) {
+
+                dialog.dismiss();
+
+            }
+
+            AppCompatDelegate.setDefaultNightMode(checked
+                    ? AppCompatDelegate.MODE_NIGHT_YES
+                    : AppCompatDelegate.MODE_NIGHT_NO);
+
+        });
+
+    }
+
+
+
+    private void standbySelectedOrders(List<DispatchOrder> targets) {
+
+        setLoading(true);
+
+        executorService.execute(() -> {
+
+            List<String> success = new ArrayList<>();
+
+            List<String> failed = new ArrayList<>();
+
+
+
+            for (DispatchOrder order : targets) {
+
+                String errorMessage = repository.pushTrackingStandby(order, order.shippingCode());
+
+                String label = order.shortMarketLabel() + " / "
+
+                        + safeText(order.recipientName) + " / "
+
+                        + safeText(order.trackingNumber);
+
+                if (errorMessage == null || errorMessage.trim().isEmpty()) {
+
+                    success.add(label);
+
+                } else {
+
+                    failed.add(label + "\n  → " + errorMessage.trim());
+
+                }
+
+            }
+
+
+
+            runOnUiThread(() -> {
+
+                setLoading(false);
+
+                showUploadResultDialog(success, failed);
+
+            });
+
+        });
+
+    }
+
 
 
     private void configureAlertSettings(View dialogView) {
@@ -1772,11 +1762,7 @@ public class MainActivity extends AppCompatActivity {
 
         View layoutInterval = dialogView.findViewById(R.id.layoutPollingInterval);
 
-        MaterialButton btn10 = dialogView.findViewById(R.id.btn10min);
-
-        MaterialButton btn20 = dialogView.findViewById(R.id.btn20min);
-
-        MaterialButton btn30 = dialogView.findViewById(R.id.btn30min);
+        EditText editPollingInterval = dialogView.findViewById(R.id.editPollingIntervalMin);
 
 
 
@@ -1788,7 +1774,9 @@ public class MainActivity extends AppCompatActivity {
 
         layoutInterval.setVisibility(pollingEnabled ? View.VISIBLE : View.GONE);
 
-        highlightIntervalButton(btn10, btn20, btn30, pollingMin);
+        editPollingInterval.setText(String.valueOf(pollingMin));
+
+        editPollingInterval.setSelection(editPollingInterval.getText().length());
 
 
 
@@ -1798,31 +1786,41 @@ public class MainActivity extends AppCompatActivity {
 
             layoutInterval.setVisibility(checked ? View.VISIBLE : View.GONE);
 
+            savePollingIntervalFromInput(editPollingInterval, false);
+
             applyPollingSchedule(checked);
 
         });
 
-        View.OnClickListener intervalClick = v -> {
+        editPollingInterval.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) {
+                savePollingIntervalFromInput(editPollingInterval, true);
+            }
+        });
 
-            int min = (v == btn10) ? 15 : (v == btn20) ? 20 : 30;
+        editPollingInterval.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                savePollingIntervalFromInput(editPollingInterval, true);
+                v.clearFocus();
+                return true;
+            }
+            return false;
+        });
 
-            AlertPrefs.prefs(this).edit().putInt(AlertPrefs.KEY_POLLING_INTERVAL, min).apply();
-
-            highlightIntervalButton(btn10, btn20, btn30, min);
-
-            if (AlertPrefs.isPollingEnabled(this)) {
-
-                applyPollingSchedule(true);
-
+        editPollingInterval.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
             }
 
-        };
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
 
-        btn10.setOnClickListener(intervalClick);
-
-        btn20.setOnClickListener(intervalClick);
-
-        btn30.setOnClickListener(intervalClick);
+            @Override
+            public void afterTextChanged(Editable s) {
+                savePollingIntervalFromInput(editPollingInterval, true);
+            }
+        });
 
 
 
@@ -2030,6 +2028,24 @@ public class MainActivity extends AppCompatActivity {
 
             });
 
+            View disableButton = itemView.findViewById(R.id.btnMarketConfigDisable);
+
+            disableButton.setEnabled(config.enabled);
+
+            disableButton.setAlpha(config.enabled ? 1f : 0.45f);
+
+            disableButton.setOnClickListener(v -> {
+
+                credentialStore.setCafe24MarketEnabled(config.key, false);
+
+                dialog.dismiss();
+
+                showToast(config.displayName + " 판매처를 목록에서 숨겼습니다. JSON은 보관됩니다.");
+
+                refreshOrders();
+
+            });
+
             itemView.findViewById(R.id.btnMarketConfigDelete).setOnClickListener(v -> {
 
                 dialog.dismiss();
@@ -2142,7 +2158,7 @@ public class MainActivity extends AppCompatActivity {
         if (normalized.contains("invalid refresh_token") || normalized.contains("invalid_grant")) {
 
             return new MarketStatusUiState("재연결 필요",
-                    "refresh 토큰이 만료됐습니다.\n새 JSON을 다시 연결하세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2151,8 +2167,8 @@ public class MainActivity extends AppCompatActivity {
                 || normalized.contains("access_token time expired")
                 || normalized.contains("invalid_token")) {
 
-            return new MarketStatusUiState("토큰 만료",
-                    "access token이 만료됐습니다.\n새 JSON을 다시 연결하세요.\n응답: " + simplifyCafe24ErrorReason(status),
+            return new MarketStatusUiState("인증 필요",
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2198,7 +2214,15 @@ public class MainActivity extends AppCompatActivity {
         if (status.contains("401")) {
 
             return new MarketStatusUiState("인증 실패",
-                    "인증에 실패했습니다.\n새 JSON 또는 계정 권한을 확인하세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    "인증을 다시 해주세요.\nJSON 파일과 계정 권한을 확인하세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
+
+        }
+
+        if (status.contains("인증을 다시")) {
+
+            return new MarketStatusUiState("인증 필요",
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2421,17 +2445,63 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-    private void highlightIntervalButton(MaterialButton b10, MaterialButton b20, MaterialButton b30, int selected) {
+    private boolean savePollingIntervalFromInput(EditText input, boolean rescheduleIfEnabled) {
 
-        int activeColor = getResources().getColor(R.color.ship_primary, getTheme());
+        String raw = input.getText() == null ? "" : input.getText().toString().trim();
 
-        int defaultColor = getResources().getColor(R.color.ship_text_secondary, getTheme());
+        if (raw.isEmpty()) {
 
-        b10.setTextColor(selected == 15 ? activeColor : defaultColor);
+            input.setError("분을 입력하세요.");
 
-        b20.setTextColor(selected == 20 ? activeColor : defaultColor);
+            return false;
 
-        b30.setTextColor(selected == 30 ? activeColor : defaultColor);
+        }
+
+        int intervalMinutes;
+
+        try {
+
+            intervalMinutes = Integer.parseInt(raw);
+
+        } catch (NumberFormatException ex) {
+
+            input.setError("숫자로 입력하세요.");
+
+            return false;
+
+        }
+
+        if (intervalMinutes < AlertPrefs.MIN_POLLING_INTERVAL
+                || intervalMinutes > AlertPrefs.MAX_POLLING_INTERVAL) {
+
+            input.setError(AlertPrefs.MIN_POLLING_INTERVAL + "~"
+                    + AlertPrefs.MAX_POLLING_INTERVAL + "분으로 입력하세요.");
+
+            return false;
+
+        }
+
+        input.setError(null);
+
+        int normalized = AlertPrefs.normalizePollingInterval(intervalMinutes);
+
+        if (normalized != AlertPrefs.getPollingInterval(this)) {
+
+            AlertPrefs.prefs(this).edit()
+
+                    .putInt(AlertPrefs.KEY_POLLING_INTERVAL, normalized)
+
+                    .apply();
+
+            if (rescheduleIfEnabled && AlertPrefs.isPollingEnabled(this)) {
+
+                applyPollingSchedule(true);
+
+            }
+
+        }
+
+        return true;
 
     }
 
@@ -2576,7 +2646,7 @@ public class MainActivity extends AppCompatActivity {
             setLoading(true);
             executorService.execute(() -> {
                 try {
-                    String validatedJson = repository.validateAndNormalizeCafe24Json(json);
+                    String validatedJson = LiveShipmentRepository.normalizeCafe24JsonForStorage(json);
                     runOnUiThread(() -> {
                         Cafe24ImportTarget importTarget = finalCreateMode
                                 ? resolveCafe24ImportTarget(finalMallId, finalRequestedName)
@@ -2585,7 +2655,7 @@ public class MainActivity extends AppCompatActivity {
                         credentialStore.saveCafe24Json(importTarget.slot, validatedJson, sourceLabel, sourceUri);
                         credentialStore.setCafe24MarketEnabled(importTarget.slot, true);
                         clearPendingCafe24Import();
-                        showToast(importTarget.marketName + " JSON을 검증하고 저장했습니다.");
+                        showToast(importTarget.marketName + " JSON 위치를 저장했습니다.");
                         refreshOrders();
                     });
                 } catch (Exception ex) {
@@ -3037,7 +3107,7 @@ public class MainActivity extends AppCompatActivity {
 
         importSpreadsheetButton.setEnabled(!loading && !allOrders.isEmpty());
 
-        standbyPageButton.setEnabled(!loading && hasOpenableCafe24StandbyPage());
+        standbyPageButton.setEnabled(!loading && countReadyOrders() > 0);
 
         selectAllCheckBox.setEnabled(!loading && !displayedOrders.isEmpty());
 

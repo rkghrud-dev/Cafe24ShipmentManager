@@ -3,10 +3,10 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="8dp"
+    android:layout_marginBottom="10dp"
     android:background="@drawable/bg_inline_panel"
     android:orientation="vertical"
-    android:padding="12dp">
+    android:padding="14dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -18,7 +18,7 @@
             android:id="@+id/cbMarketConfigEnabled"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="사용"
+            android:text="표시"
             android:textColor="@color/ship_text_primary"
             app:buttonTint="@color/ship_primary" />
 
@@ -28,7 +28,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:textColor="@color/ship_text_primary"
-            android:textSize="13sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <TextView
@@ -41,7 +41,7 @@
             android:paddingBottom="4dp"
             android:text="Cafe24"
             android:textColor="@color/ship_primary"
-            android:textSize="10sp"
+            android:textSize="11sp"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -49,15 +49,15 @@
         android:id="@+id/tvMarketConfigPath"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="6dp"
         android:textColor="@color/ship_text_secondary"
-        android:textSize="11sp" />
+        android:textSize="12sp" />
 
     <TextView
         android:id="@+id/tvMarketConfigBadge"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="10dp"
         android:background="@drawable/bg_status_chip_warning"
         android:paddingStart="10dp"
         android:paddingTop="4dp"
@@ -65,53 +65,76 @@
         android:paddingBottom="4dp"
         android:text="확인 필요"
         android:textColor="@color/ship_warning"
-        android:textSize="10sp"
+        android:textSize="11sp"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/tvMarketConfigStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="7dp"
         android:textColor="@color/ship_text_primary"
-        android:textSize="11sp" />
+        android:textSize="12sp" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:orientation="horizontal">
+        android:layout_marginTop="12dp"
+        android:orientation="vertical">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnMarketConfigJson"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:text="JSON 선택"
-            android:textSize="10sp"
-            app:cornerRadius="14dp" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="38dp"
+            android:orientation="horizontal">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnMarketConfigRename"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:text="이름 수정"
-            android:textSize="10sp"
-            app:cornerRadius="14dp" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMarketConfigJson"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="38dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:text="JSON 선택"
+                android:textSize="12sp"
+                app:cornerRadius="14dp" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnMarketConfigDelete"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:text="삭제"
-            android:textSize="10sp"
-            app:cornerRadius="14dp" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMarketConfigRename"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="38dp"
+                android:layout_weight="1"
+                android:text="이름 수정"
+                android:textSize="12sp"
+                app:cornerRadius="14dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="38dp"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMarketConfigDisable"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="38dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:text="비활성화"
+                android:textSize="12sp"
+                app:cornerRadius="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMarketConfigDelete"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="38dp"
+                android:layout_weight="1"
+                android:text="삭제"
+                android:textSize="12sp"
+                app:cornerRadius="14dp" />
+        </LinearLayout>
     </LinearLayout>
 </LinearLayout>

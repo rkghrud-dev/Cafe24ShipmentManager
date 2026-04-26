@@ -223,7 +223,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     private SourceFetchResult fetchCafe24Source(String slot, String displayName) {
 
-        String rawJson = credentialStore.getCafe24Json(slot);
+        String rawJson = getCafe24JsonForUse(slot);
 
         if (rawJson.isEmpty()) {
 
@@ -251,9 +251,31 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
 
-            if (mallId.isEmpty() || accessToken.isEmpty()) {
+            if (mallId.isEmpty()) {
 
-                return SourceFetchResult.failure(displayName + " Cafe24\n필수 키가 부족합니다. MallId와 AccessToken을 확인하세요.");
+                return SourceFetchResult.failure(displayName + " Cafe24\n필수 키가 부족합니다. MallId를 확인하세요.");
+
+            }
+
+            if (accessToken.isEmpty()) {
+
+                if (!hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
+
+                    return SourceFetchResult.failure(displayName + " Cafe24\n인증을 다시 해주세요. AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
+
+                }
+
+                String refreshedToken = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, credential, slot);
+
+                if (refreshedToken.isEmpty()) {
+
+                    return SourceFetchResult.failure(displayName + " Cafe24\n인증을 다시 해주세요. RefreshToken으로 access token을 갱신하지 못했습니다.");
+
+                }
+
+                accessToken = refreshedToken;
+
+                refreshToken = credential.optString("RefreshToken", refreshToken).trim();
 
             }
 
@@ -314,6 +336,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     if (!refreshedToken.isEmpty()) {
 
                         accessToken = refreshedToken;
+
+                        refreshToken = credential.optString("RefreshToken", refreshToken).trim();
 
                         tokenRetried = true;
 
@@ -669,6 +693,168 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     }
 
+    public static String normalizeCafe24JsonForStorage(String rawJson) throws Exception {
+
+        return normalizeCafe24JsonForStorage(rawJson, true);
+
+    }
+
+    private static String normalizeCafe24JsonForStorage(String rawJson, boolean stampUpdatedAt) throws Exception {
+
+        JSONObject credential = new JSONObject(rawJson == null ? "{}" : rawJson);
+
+        String mallId = credential.optString("MallId", "").trim();
+
+        if (mallId.isEmpty()) {
+
+            throw new Exception("MallId가 없습니다.");
+
+        }
+
+        String accessToken = credential.optString("AccessToken", "").trim();
+
+        String clientId = credential.optString("ClientId", "").trim();
+
+        String clientSecret = credential.optString("ClientSecret", "").trim();
+
+        String refreshToken = credential.optString("RefreshToken", "").trim();
+
+        String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
+
+        if (apiVersion.isEmpty()) {
+
+            apiVersion = DEFAULT_CAFE24_API_VERSION;
+
+        }
+
+        boolean canRefresh = !clientId.isEmpty() && !clientSecret.isEmpty() && !refreshToken.isEmpty();
+
+        if (accessToken.isEmpty() && !canRefresh) {
+
+            throw new Exception("AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
+
+        }
+
+        credential.put("ApiVersion", apiVersion);
+
+        if (stampUpdatedAt && credential.optString("UpdatedAt", "").trim().isEmpty()) {
+
+            credential.put("UpdatedAt", Instant.now().toString());
+
+        }
+
+        return credential.toString();
+
+    }
+
+    private String getCafe24JsonForUse(String slot) {
+
+        String storedJson = credentialStore.getCafe24Json(slot);
+
+        Cafe24MarketConfig config = credentialStore.getCafe24Market(slot);
+
+        if (config == null || config.sourceUri.isEmpty()) {
+
+            return storedJson;
+
+        }
+
+        String sourceJson = readCafe24SourceJson(config.sourceUri);
+
+        if (sourceJson.isEmpty()) {
+
+            return storedJson;
+
+        }
+
+        try {
+
+            String normalizedJson = preserveStoredCafe24UpdatedAt(
+                    normalizeCafe24JsonForStorage(sourceJson, false),
+                    storedJson
+            );
+
+            if (!normalizedJson.equals(config.json)) {
+
+                credentialStore.saveCafe24Json(slot, normalizedJson, config.sourceLabel, config.sourceUri);
+
+            }
+
+            return normalizedJson;
+
+        } catch (Exception ignored) {
+
+            return storedJson;
+
+        }
+
+    }
+
+    private String preserveStoredCafe24UpdatedAt(String normalizedJson, String storedJson) {
+
+        try {
+
+            JSONObject normalized = new JSONObject(normalizedJson);
+
+            if (!normalized.optString("UpdatedAt", "").trim().isEmpty()) {
+
+                return normalizedJson;
+
+            }
+
+            JSONObject stored = new JSONObject(storedJson == null ? "{}" : storedJson);
+
+            String updatedAt = stored.optString("UpdatedAt", "").trim();
+
+            if (updatedAt.isEmpty()) {
+
+                return normalizedJson;
+
+            }
+
+            normalized.put("UpdatedAt", updatedAt);
+
+            return normalized.toString();
+
+        } catch (Exception ignored) {
+
+            return normalizedJson;
+
+        }
+
+    }
+
+    private String readCafe24SourceJson(String sourceUri) {
+
+        if (sourceUri == null || sourceUri.trim().isEmpty() || sourceUri.startsWith("assets://")) {
+
+            return "";
+
+        }
+
+        StringBuilder builder = new StringBuilder();
+
+        try (InputStream inputStream = context.getContentResolver().openInputStream(Uri.parse(sourceUri));
+             BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+
+            String line;
+
+            while ((line = reader.readLine()) != null) {
+
+                builder.append(line).append('\n');
+
+            }
+
+            return builder.toString().trim();
+
+        } catch (Exception ignored) {
+
+            return "";
+
+        }
+
+    }
+
     public String validateAndNormalizeCafe24Json(String rawJson) throws Exception {
 
         JSONObject credential = new JSONObject(rawJson);
@@ -786,6 +972,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 applyCafe24RefreshResult(credential, refreshResult);
 
                 accessToken = refreshResult.accessToken;
+
+                refreshToken = credential.optString("RefreshToken", refreshToken).trim();
 
                 tokenRetried = true;
 
@@ -1296,7 +1484,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     private List<DispatchOrder> fetchCafe24DispatchOrders(String slot, String label, String marketName, LocalDate start, LocalDate end) throws Exception {
 
-        String rawJson = credentialStore.getCafe24Json(slot);
+        String rawJson = getCafe24JsonForUse(slot);
 
         if (rawJson.isEmpty()) throw new Exception(label + " 키가 없습니다.");
 
@@ -1316,7 +1504,18 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         String apiVersion   = cred.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
-        if (mallId.isEmpty() || accessToken.isEmpty()) throw new Exception("MallId 또는 AccessToken이 없습니다.");
+        if (mallId.isEmpty()) throw new Exception("MallId가 없습니다.");
+        if (accessToken.isEmpty()) {
+            if (!hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
+                throw new Exception("인증을 다시 해주세요. AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
+            }
+            String refreshedToken = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
+            if (refreshedToken.isEmpty()) {
+                throw new Exception("인증을 다시 해주세요. RefreshToken으로 access token을 갱신하지 못했습니다.");
+            }
+            accessToken = refreshedToken;
+            refreshToken = cred.optString("RefreshToken", refreshToken).trim();
+        }
 
 
 
@@ -1368,7 +1567,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
                 String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
 
-                if (!refreshed.isEmpty()) { accessToken = refreshed; tokenRetried = true; continue; }
+                if (!refreshed.isEmpty()) { accessToken = refreshed; refreshToken = cred.optString("RefreshToken", refreshToken).trim(); tokenRetried = true; continue; }
 
             }
 
@@ -1420,6 +1619,10 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
                 if (items == null) continue;
 
+                List<Cafe24ShipmentSnapshot> shipmentSnapshots = needsCafe24ShipmentFetch(order, items)
+                        ? fetchCafe24ShipmentSnapshots(mallId, orderId, accessToken, apiVersion, cred, slot, clientId, clientSecret, refreshToken)
+                        : Collections.emptyList();
+
                 for (int j = 0; j < items.length(); j++) {
 
                     JSONObject item = items.optJSONObject(j);
@@ -1431,6 +1634,12 @@ public class LiveShipmentRepository implements ShipmentRepository {
                             firstNonEmpty(order.optString("order_status", ""), item.optString("order_status", "")),
 
                             "N20");
+
+                    Cafe24ShipmentSnapshot shipmentSnapshot =
+                            findCafe24ShipmentSnapshot(shipmentSnapshots, item.optString("order_item_code", ""));
+                    if (shipmentSnapshot != null && !shipmentSnapshot.status.isEmpty()) {
+                        cafe24OrderStatus = shipmentSnapshot.statusCode();
+                    }
 
                     DispatchOrder dispatchOrder = new DispatchOrder(
 
@@ -1469,6 +1678,15 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     );
 
                     dispatchOrder.marketOrderReference = firstNonEmpty(opt(order, "market_order_no", ""), orderId);
+                    if (shipmentSnapshot != null) {
+                        dispatchOrder.cafe24ShippingCode = shipmentSnapshot.shippingCode;
+                        if (!shipmentSnapshot.trackingNumber.isEmpty()) {
+                            dispatchOrder.trackingNumber = shipmentSnapshot.trackingNumber;
+                        }
+                        if (!shipmentSnapshot.shippingCompanyName.isEmpty()) {
+                            dispatchOrder.shippingCompanyName = shipmentSnapshot.shippingCompanyName;
+                        }
+                    }
 
                     orders.add(dispatchOrder);
 
@@ -1484,6 +1702,175 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         return orders;
 
+    }
+
+    private boolean needsCafe24ShipmentFetch(JSONObject order, JSONArray items) {
+        if (isCafe24ShipmentStatus(firstNonEmpty(order.optString("order_status", ""), order.optString("status", "")))) {
+            return true;
+        }
+        if (items == null) {
+            return false;
+        }
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item != null && isCafe24ShipmentStatus(item.optString("order_status", ""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isCafe24ShipmentStatus(String status) {
+        String normalized = status == null ? "" : status.trim().toUpperCase(Locale.US);
+        return "N21".equals(normalized)
+                || "N30".equals(normalized)
+                || "STANDBY".equals(normalized)
+                || "SHIPPING".equals(normalized)
+                || "SHIPPED".equals(normalized);
+    }
+
+    private List<Cafe24ShipmentSnapshot> fetchCafe24ShipmentSnapshots(
+            String mallId,
+            String orderId,
+            String accessToken,
+            String apiVersion,
+            JSONObject cred,
+            String slot,
+            String clientId,
+            String clientSecret,
+            String refreshToken
+    ) {
+        String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/" + orderId + "/shipments";
+        boolean tokenRetried = false;
+        boolean versionRetried = false;
+        String currentRefreshToken = cred.optString("RefreshToken", refreshToken).trim();
+
+        try {
+            while (true) {
+                HttpResult response = executeJsonRequest("GET", url, null, buildCafe24Headers(accessToken, apiVersion));
+                if (response.isSuccessful()) {
+                    return parseCafe24ShipmentSnapshots(response.body);
+                }
+
+                String fallbackApiVersion = maybeUpgradeCafe24ApiVersion(response, cred, slot, apiVersion);
+                if (!fallbackApiVersion.equals(apiVersion) && !versionRetried) {
+                    apiVersion = fallbackApiVersion;
+                    versionRetried = true;
+                    continue;
+                }
+
+                if ((response.statusCode == 401 || response.statusCode == 403)
+                        && !tokenRetried
+                        && !currentRefreshToken.isEmpty()
+                        && !clientId.isEmpty()
+                        && !clientSecret.isEmpty()) {
+                    String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, currentRefreshToken, cred, slot);
+                    if (!refreshed.isEmpty()) {
+                        accessToken = refreshed;
+                        currentRefreshToken = cred.optString("RefreshToken", currentRefreshToken).trim();
+                        tokenRetried = true;
+                        continue;
+                    }
+                }
+                return Collections.emptyList();
+            }
+        } catch (Exception ignored) {
+            return Collections.emptyList();
+        }
+    }
+
+    private List<Cafe24ShipmentSnapshot> parseCafe24ShipmentSnapshots(String body) throws Exception {
+        List<Cafe24ShipmentSnapshot> result = new ArrayList<>();
+        JSONObject root = new JSONObject(body == null ? "{}" : body);
+        JSONArray shipments = root.optJSONArray("shipments");
+        if (shipments == null) {
+            JSONObject shipment = root.optJSONObject("shipment");
+            if (shipment != null) {
+                shipments = new JSONArray();
+                shipments.put(shipment);
+            }
+        }
+        if (shipments == null) {
+            return result;
+        }
+
+        for (int i = 0; i < shipments.length(); i++) {
+            JSONObject shipment = shipments.optJSONObject(i);
+            if (shipment == null) {
+                continue;
+            }
+            String shippingCode = firstNonEmpty(
+                    shipment.optString("shipping_code", ""),
+                    shipment.optString("shippingCode", ""),
+                    shipment.optString("shipment_code", "")
+            );
+            String status = firstNonEmpty(
+                    shipment.optString("status", ""),
+                    shipment.optString("shipping_status", ""),
+                    shipment.optString("order_status", "")
+            );
+            String trackingNumber = normalizeUploadTracking(firstNonEmpty(
+                    shipment.optString("tracking_no", ""),
+                    shipment.optString("tracking_number", ""),
+                    shipment.optString("invoice_no", "")
+            ));
+            String shippingCompanyName = firstNonEmpty(
+                    shipment.optString("shipping_company_name", ""),
+                    shipment.optString("shipping_company_code", "")
+            );
+            JSONArray items = firstJsonArray(shipment, "items", "order_items", "order_item");
+            if (items == null || items.length() == 0) {
+                result.add(new Cafe24ShipmentSnapshot("", shippingCode, status, trackingNumber, shippingCompanyName));
+                continue;
+            }
+            for (int j = 0; j < items.length(); j++) {
+                JSONObject item = items.optJSONObject(j);
+                if (item == null) {
+                    continue;
+                }
+                String orderItemCode = firstNonEmpty(
+                        item.optString("order_item_code", ""),
+                        item.optString("item_code", ""),
+                        item.optString("orderItemCode", "")
+                );
+                result.add(new Cafe24ShipmentSnapshot(orderItemCode, shippingCode, status, trackingNumber, shippingCompanyName));
+            }
+        }
+        return result;
+    }
+
+    private JSONArray firstJsonArray(JSONObject object, String... keys) {
+        if (object == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            JSONArray array = object.optJSONArray(key);
+            if (array != null) {
+                return array;
+            }
+        }
+        return null;
+    }
+
+    private Cafe24ShipmentSnapshot findCafe24ShipmentSnapshot(List<Cafe24ShipmentSnapshot> snapshots, String orderItemCode) {
+        if (snapshots == null || snapshots.isEmpty()) {
+            return null;
+        }
+        String itemCode = orderItemCode == null ? "" : orderItemCode.trim();
+        Cafe24ShipmentSnapshot fallback = null;
+        for (Cafe24ShipmentSnapshot snapshot : snapshots) {
+            if (snapshot == null) {
+                continue;
+            }
+            if (snapshot.orderItemCode.isEmpty() && fallback == null) {
+                fallback = snapshot;
+                continue;
+            }
+            if (!itemCode.isEmpty() && itemCode.equals(snapshot.orderItemCode)) {
+                return snapshot;
+            }
+        }
+        return fallback;
     }
 
 
@@ -1668,11 +2055,38 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     }
 
+    /** @return 빈 문자열이면 성공, 아니면 오류 메시지 */
+    public String pushTrackingStandby(DispatchOrder order, String shippingCode) {
+
+        try {
+
+            if ("coupang".equals(order.marketKey)) {
+
+                return "쿠팡은 송장대기 API 대상이 아닙니다.";
+
+            }
+
+            return pushCafe24Shipment(order, shippingCode, "standby");
+
+        } catch (Exception ex) {
+
+            return ex.getMessage();
+
+        }
+
+    }
+
 
 
     private String pushCafe24Tracking(DispatchOrder order, String shippingCode) throws Exception {
 
-        String rawJson = credentialStore.getCafe24Json(order.marketKey);
+        return pushCafe24Shipment(order, shippingCode, "shipping");
+
+    }
+
+    private String pushCafe24Shipment(DispatchOrder order, String shippingCode, String status) throws Exception {
+
+        String rawJson = getCafe24JsonForUse(order.marketKey);
 
         if (rawJson.isEmpty()) return "Cafe24 키 없음";
 
@@ -1695,6 +2109,22 @@ public class LiveShipmentRepository implements ShipmentRepository {
         String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/" + order.orderId + "/shipments";
 
         String requestedTracking = normalizeUploadTracking(order.trackingNumber);
+        String requestedStatus = "standby".equals(status) ? "standby" : "shipping";
+
+        if ("shipping".equals(requestedStatus) && !order.cafe24ShippingCode.trim().isEmpty()) {
+            return updateCafe24ShipmentStatus(
+                    mallId,
+                    order,
+                    order.cafe24ShippingCode.trim(),
+                    requestedStatus,
+                    accessToken,
+                    apiVersion,
+                    cred,
+                    clientId,
+                    clientSecret,
+                    refreshToken
+            );
+        }
 
         String body = "{\"shop_no\":1,\"request\":{\"order_item_code\":[\"" + order.orderItemCode + "\"],"
 
@@ -1702,7 +2132,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
                 + "\"shipping_company_code\":\"" + shippingCode + "\","
 
-                + "\"status\":\"shipping\"}}";
+                + "\"status\":\"" + requestedStatus + "\"}}";
 
 
 
@@ -1742,6 +2172,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
                     accessToken = refreshed;
 
+                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
+
                     tokenRetried = true;
 
                     continue;
@@ -1752,7 +2184,38 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
 
-            String resolvedMessage = resolveCafe24UploadConflict(resp, mallId, order, requestedTracking, accessToken, apiVersion, cred, order.marketKey, clientId, clientSecret, refreshToken);
+            if ("shipping".equals(requestedStatus)) {
+                Cafe24ShipmentSnapshot existingShipment = findCafe24ShipmentSnapshot(
+                        fetchCafe24ShipmentSnapshots(mallId, order.orderId, accessToken, apiVersion, cred,
+                                order.marketKey, clientId, clientSecret, refreshToken),
+                        order.orderItemCode
+                );
+                if (existingShipment != null && !existingShipment.shippingCode.isEmpty()) {
+                    order.cafe24ShippingCode = existingShipment.shippingCode;
+                    if (!existingShipment.trackingNumber.isEmpty()) {
+                        order.trackingNumber = existingShipment.trackingNumber;
+                    }
+                    if (!existingShipment.shippingCompanyName.isEmpty()) {
+                        order.shippingCompanyName = existingShipment.shippingCompanyName;
+                    }
+                    return updateCafe24ShipmentStatus(
+                            mallId,
+                            order,
+                            existingShipment.shippingCode,
+                            requestedStatus,
+                            accessToken,
+                            apiVersion,
+                            cred,
+                            clientId,
+                            clientSecret,
+                            refreshToken
+                    );
+                }
+            }
+
+
+
+            String resolvedMessage = resolveCafe24UploadConflict(resp, mallId, order, requestedTracking, requestedStatus, accessToken, apiVersion, cred, order.marketKey, clientId, clientSecret, refreshToken);
 
             if (resolvedMessage != null) {
 
@@ -1768,11 +2231,79 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     }
 
+    private String updateCafe24ShipmentStatus(
+            String mallId,
+            DispatchOrder order,
+            String cafe24ShippingCode,
+            String requestedStatus,
+            String accessToken,
+            String apiVersion,
+            JSONObject cred,
+            String clientId,
+            String clientSecret,
+            String refreshToken
+    ) throws Exception {
+        String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/"
+                + order.orderId + "/shipments/" + cafe24ShippingCode;
+        String body = "{\"shop_no\":1,\"request\":{\"status\":\"" + requestedStatus + "\"}}";
+        boolean tokenRetried = false;
+        boolean versionRetried = false;
+
+        while (true) {
+            HttpResult response = executeJsonRequest("PUT", url, body, buildCafe24Headers(accessToken, apiVersion));
+            if (response.isSuccessful()) {
+                return "";
+            }
+
+            String fallbackApiVersion = maybeUpgradeCafe24ApiVersion(response, cred, order.marketKey, apiVersion);
+            if (!fallbackApiVersion.equals(apiVersion) && !versionRetried) {
+                apiVersion = fallbackApiVersion;
+                versionRetried = true;
+                continue;
+            }
+
+            if ((response.statusCode == 401 || response.statusCode == 403)
+                    && !tokenRetried
+                    && !refreshToken.isEmpty()
+                    && !clientId.isEmpty()
+                    && !clientSecret.isEmpty()) {
+                String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, order.marketKey);
+                if (!refreshed.isEmpty()) {
+                    accessToken = refreshed;
+                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
+                    tokenRetried = true;
+                    continue;
+                }
+            }
+
+            String resolvedMessage = resolveCafe24UploadConflict(
+                    response,
+                    mallId,
+                    order,
+                    normalizeUploadTracking(order.trackingNumber),
+                    requestedStatus,
+                    accessToken,
+                    apiVersion,
+                    cred,
+                    order.marketKey,
+                    clientId,
+                    clientSecret,
+                    refreshToken
+            );
+            if (resolvedMessage != null) {
+                return resolvedMessage;
+            }
+
+            return "Cafe24 오류 " + response.statusCode + ": " + clip(response.body);
+        }
+    }
+
     private String resolveCafe24UploadConflict(
             HttpResult response,
             String mallId,
             DispatchOrder order,
             String requestedTracking,
+            String requestedStatus,
             String accessToken,
             String apiVersion,
             JSONObject cred,
@@ -1812,6 +2343,16 @@ public class LiveShipmentRepository implements ShipmentRepository {
         }
         if (!snapshot.shippingCompanyName.isEmpty()) {
             order.shippingCompanyName = snapshot.shippingCompanyName;
+        }
+
+        if ("standby".equals(requestedStatus) && snapshot.isStandbyDone()) {
+            if (!snapshot.trackingNumber.isEmpty() && snapshot.trackingNumber.equals(requestedTracking)) {
+                return "";
+            }
+            if (!snapshot.trackingNumber.isEmpty()) {
+                return "이미 송장대기 상태입니다. 현재 송장: " + snapshot.trackingNumber;
+            }
+            return "이미 송장대기 상태입니다. 새로고침 후 확인하세요.";
         }
 
         if (snapshot.isShippingDone()) {
@@ -1894,6 +2435,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
                 if (!refreshed.isEmpty()) {
                     accessToken = refreshed;
+                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
                     tokenRetried = true;
                     continue;
                 }
@@ -1905,6 +2447,34 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     private String normalizeUploadTracking(String trackingNumber) {
         return trackingNumber == null ? "" : trackingNumber.replaceAll("[^a-zA-Z0-9]", "");
+    }
+
+    private static final class Cafe24ShipmentSnapshot {
+        final String orderItemCode;
+        final String shippingCode;
+        final String status;
+        final String trackingNumber;
+        final String shippingCompanyName;
+
+        Cafe24ShipmentSnapshot(String orderItemCode, String shippingCode, String status,
+                               String trackingNumber, String shippingCompanyName) {
+            this.orderItemCode = orderItemCode == null ? "" : orderItemCode.trim();
+            this.shippingCode = shippingCode == null ? "" : shippingCode.trim();
+            this.status = status == null ? "" : status.trim();
+            this.trackingNumber = trackingNumber == null ? "" : trackingNumber.trim();
+            this.shippingCompanyName = shippingCompanyName == null ? "" : shippingCompanyName.trim();
+        }
+
+        String statusCode() {
+            String normalized = status.toUpperCase(Locale.US);
+            if ("STANDBY".equals(normalized)) {
+                return "N21";
+            }
+            if ("SHIPPING".equals(normalized) || "SHIPPED".equals(normalized)) {
+                return "N30";
+            }
+            return status;
+        }
     }
 
     private static final class Cafe24OrderItemSnapshot {
@@ -1926,6 +2496,12 @@ public class LiveShipmentRepository implements ShipmentRepository {
             return "N30".equalsIgnoreCase(orderStatus)
                     || statusText.contains("배송중")
                     || !shippedDate.isEmpty();
+        }
+
+        boolean isStandbyDone() {
+            return "N21".equalsIgnoreCase(orderStatus)
+                    || statusText.contains("배송대기")
+                    || statusText.toLowerCase(Locale.US).contains("standby");
         }
 
         String statusLabel() {
@@ -2286,9 +2862,17 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
 
-    private static String firstNonEmpty(String first, String fallback) {
+    private static String firstNonEmpty(String... values) {
 
-        return first == null || first.trim().isEmpty() ? fallback : first;
+        if (values == null) {
+            return "";
+        }
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) {
+                return value;
+            }
+        }
+        return "";
 
     }
 

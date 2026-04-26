@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ship_background">#000000</color>
+    <color name="ship_surface">#1C1C1E</color>
+    <color name="ship_alert_surface">#2C2C2E</color>
+    <color name="ship_inline_surface">#2C2C2E</color>
+    <color name="ship_outline">#3A3A3C</color>
+    <color name="ship_primary">#0A84FF</color>
+    <color name="ship_on_primary">#FFFFFF</color>
+    <color name="ship_accent">#BF5AF2</color>
+    <color name="ship_accent_deep">#F2F2F7</color>
+    <color name="ship_info">#64D2FF</color>
+    <color name="ship_text_primary">#F2F2F7</color>
+    <color name="ship_text_secondary">#AEAEB2</color>
+    <color name="ship_success">#30D158</color>
+    <color name="ship_success_surface">#173820</color>
+    <color name="ship_warning">#FF9F0A</color>
+    <color name="ship_warning_surface">#3A2A12</color>
+    <color name="ship_error">#FF453A</color>
+    <color name="ship_error_surface">#3D1715</color>
+    <color name="ship_chip_text">#FFFFFF</color>
+    <color name="ship_market_chip">#122E4F</color>
+    <color name="ship_drawer_scrim">#99000000</color>
+</resources>

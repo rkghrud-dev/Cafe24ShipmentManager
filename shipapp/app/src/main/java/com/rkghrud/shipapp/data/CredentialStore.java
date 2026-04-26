@@ -282,7 +282,13 @@ public class CredentialStore {
 
     public void saveCafe24Json(String slot, String json) {
 
-        saveCafe24Json(slot, json, "", "");
+        Cafe24MarketConfig existing = getCafe24Market(slot);
+        saveCafe24Json(
+                slot,
+                json,
+                existing == null ? "" : existing.sourceLabel,
+                existing == null ? "" : existing.sourceUri
+        );
 
     }
 

@@ -11,6 +11,8 @@ import java.util.Set;
 public final class AlertPrefs {
     private static final String PREFS = "shipapp_alert_prefs";
     private static final int DEFAULT_POLLING_INTERVAL = 15;
+    public static final int MIN_POLLING_INTERVAL = 1;
+    public static final int MAX_POLLING_INTERVAL = 1440;
     private static final int DEFAULT_SCHEDULED_DAYS = 0b0011111; // 월-금
     private static final int MAX_KNOWN_ORDER_KEYS = 2000;
 
@@ -21,6 +23,7 @@ public final class AlertPrefs {
     public static final String KEY_SCHEDULED_MINUTE = "scheduled_minute";
     public static final String KEY_SCHEDULED_DAYS = "scheduled_days";
     public static final String KEY_VIBRATE = "vibrate_enabled";
+    public static final String KEY_DARK_MODE = "dark_mode_enabled";
     public static final String KEY_LAST_ORDER_COUNT = "last_order_count";
     public static final String KEY_KNOWN_ORDER_KEYS = "known_order_keys";
 
@@ -40,13 +43,13 @@ public final class AlertPrefs {
     }
 
     public static int normalizePollingInterval(int intervalMinutes) {
-        if (intervalMinutes >= 30) {
-            return 30;
+        if (intervalMinutes < MIN_POLLING_INTERVAL) {
+            return DEFAULT_POLLING_INTERVAL;
         }
-        if (intervalMinutes >= 20) {
-            return 20;
+        if (intervalMinutes > MAX_POLLING_INTERVAL) {
+            return MAX_POLLING_INTERVAL;
         }
-        return DEFAULT_POLLING_INTERVAL;
+        return intervalMinutes;
     }
 
     public static boolean isScheduledEnabled(Context context) {
@@ -75,6 +78,10 @@ public final class AlertPrefs {
 
     public static boolean isVibrateEnabled(Context context) {
         return prefs(context).getBoolean(KEY_VIBRATE, true);
+    }
+
+    public static boolean isDarkModeEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_DARK_MODE, false);
     }
 
     public static int getLastOrderCount(Context context) {

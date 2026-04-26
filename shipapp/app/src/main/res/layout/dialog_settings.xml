@@ -7,17 +7,39 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp">
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp">
 
         <TextView
             android:id="@+id/tvSettingsSummary"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_inline_panel"
-            android:padding="10dp"
+            android:padding="12dp"
             android:textColor="@color/ship_text_primary"
-            android:textSize="12sp" />
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="다크 모드"
+                android:textColor="@color/ship_text_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDarkMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
@@ -25,14 +47,14 @@
             android:layout_marginTop="12dp"
             android:text="Cafe24 판매처"
             android:textColor="@color/ship_text_primary"
-            android:textSize="13sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="판매처명은 구글시트 발주사 매칭에 사용됩니다. 체크된 판매처만 메인 화면에 보이고 조회됩니다."
+            android:text="JSON 파일 위치를 저장합니다. 인증이 만료되면 기존 위치는 유지하고 재인증 안내만 표시합니다."
             android:textColor="@color/ship_text_secondary"
             android:textSize="11sp" />
 
@@ -53,30 +75,31 @@
                 android:id="@+id/btnSettingsAddCafe24Market"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
-                android:layout_height="40dp"
+                android:layout_height="42dp"
                 android:layout_marginEnd="8dp"
                 android:layout_weight="1"
                 android:text="JSON 키로 추가"
-                android:textSize="11sp" />
+                android:textSize="12sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnSettingsLoadDebugSeeds"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
-                android:layout_height="40dp"
+                android:layout_height="42dp"
                 android:layout_weight="1"
                 android:text="@string/settings_restore_default_markets"
-                android:textSize="11sp" />
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnSettingsClearKeys"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
+            android:layout_height="42dp"
             android:layout_marginTop="8dp"
             android:text="저장 키 초기화"
-            android:textSize="11sp" />
+            android:textSize="12sp" />
 
         <View
             android:layout_width="match_parent"
@@ -140,34 +163,33 @@
                 android:textColor="@color/ship_text_secondary"
                 android:textSize="12sp" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn10min"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <EditText
+                android:id="@+id/editPollingIntervalMin"
                 android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_marginEnd="4dp"
+                android:layout_height="42dp"
+                android:layout_marginEnd="8dp"
                 android:layout_weight="1"
-                android:text="15분"
-                android:textSize="11sp" />
+                android:background="@drawable/bg_inline_panel"
+                android:gravity="center"
+                android:hint="15"
+                android:imeOptions="actionDone"
+                android:inputType="number"
+                android:maxLength="4"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:selectAllOnFocus="true"
+                android:singleLine="true"
+                android:textColor="@color/ship_text_primary"
+                android:textColorHint="@color/ship_text_secondary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn20min"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_marginEnd="4dp"
-                android:layout_weight="1"
-                android:text="20분"
-                android:textSize="11sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn30min"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="34dp"
-                android:layout_weight="1"
-                android:text="30분"
-                android:textSize="11sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="분"
+                android:textColor="@color/ship_text_secondary"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <View
