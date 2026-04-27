@@ -460,7 +460,7 @@ public partial class MainForm
             return;
         }
 
-        var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
+        var rows = BuildOrderExportRowsEx(orders);
         var validCount = rows.Count(row => !string.IsNullOrWhiteSpace(row.ProductCode));
         var missingCount = rows.Count - validCount;
         var extraColumnCount = CurrentOrderExportLeadingColumnCountEx;
@@ -503,7 +503,9 @@ public partial class MainForm
             return;
         }
 
-        var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
+        if (!TryPrepareOrderExportRowsEx(orders, out var rows))
+            return;
+
         var clipboardText = ShipmentRequestOrderExportFormatterEx.BuildClipboardText(
             rows,
             CurrentOrderExportIncludeSupplierProductEx,
@@ -561,10 +563,11 @@ public partial class MainForm
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        ShipmentRequestOrderExportFormatterEx.SaveAsWorkbook(
-            orders,
-            CurrentOrderExportMarketNameEx,
-            CurrentOrderExportDateTextEx,
+        if (!TryPrepareOrderExportRowsEx(orders, out var rows))
+            return;
+
+        ShipmentRequestOrderExportFormatterEx.SaveRowsAsWorkbook(
+            rows,
             dialog.FileName,
             CurrentOrderExportIncludeSupplierProductEx,
             CurrentOrderExportIncludeOptionEx);
@@ -572,7 +575,6 @@ public partial class MainForm
         string? historyError = null;
         try
         {
-            var rows = ShipmentRequestOrderExportFormatterEx.BuildRows(orders, CurrentOrderExportMarketNameEx, CurrentOrderExportDateTextEx).ToList();
             SaveOrderExportHistoryEx(rows, "workbook", dialog.FileName);
         }
         catch (Exception ex)
@@ -627,6 +629,93 @@ public partial class MainForm
         _log.Info($"출고용 이력 저장: {batchId} / {savedFrom} / {rows.Count}건");
         RefreshOrderExportHistoryBatchesEx(batchId);
     }
+
+    private List<ShipmentRequestOrderRowEx> BuildOrderExportRowsEx(IReadOnlyCollection<Cafe24Order> orders)
+    {
+        return ShipmentRequestOrderExportFormatterEx.BuildRows(
+            orders,
+            CurrentOrderExportMarketNameEx,
+            CurrentOrderExportDateTextEx,
+            LoadOrderExportProductCodeMappingsEx()).ToList();
+    }
+
+    private Dictionary<string, string> LoadOrderExportProductCodeMappingsEx()
+    {
+        try
+        {
+            return _db.GetShipmentRequestProductCodeMappings(_currentUser.Id)
+                .Where(mapping => !string.IsNullOrWhiteSpace(mapping.ProductKey) &&
+                                  !string.IsNullOrWhiteSpace(mapping.ProductCode))
+                .GroupBy(mapping => mapping.ProductKey, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Last().ProductCode.Trim().ToUpperInvariant(),
+                    StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"출고용 상품코드 매핑 로드 실패: {ex.Message}");
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private bool TryPrepareOrderExportRowsEx(IReadOnlyCollection<Cafe24Order> orders, out List<ShipmentRequestOrderRowEx> rows)
+    {
+        rows = BuildOrderExportRowsEx(orders);
+        var missingRows = rows
+            .Where(row => string.IsNullOrWhiteSpace(row.ProductCode) &&
+                          !string.IsNullOrWhiteSpace(row.ProductMatchKey))
+            .GroupBy(row => row.ProductMatchKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+
+        if (missingRows.Count == 0)
+            return true;
+
+        var answer = MessageBox.Show(
+            this,
+            $"직접 입력이 필요한 상품 {missingRows.Count}건이 있습니다.\n지금 상품코드를 등록하면 다음부터 같은 상품명/옵션은 자동으로 채워집니다.",
+            "직접입력 상품코드 등록",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Question);
+
+        if (answer == DialogResult.Cancel)
+            return false;
+        if (answer == DialogResult.No)
+            return true;
+
+        using var dialog = new OrderExportProductCodeMappingDialogEx(missingRows);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return true;
+
+        var savedCount = 0;
+        foreach (var input in dialog.GetMappings())
+        {
+            var productCode = input.ProductCode.Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(input.ProductKey) || string.IsNullOrWhiteSpace(productCode))
+                continue;
+
+            _db.UpsertShipmentRequestProductCodeMapping(new ShipmentRequestProductCodeMapping
+            {
+                AppUserId = _currentUser.Id,
+                ProductKey = input.ProductKey,
+                SupplierProductName = input.SupplierProductName,
+                ProductOption = input.ProductOption,
+                ProductCode = productCode
+            });
+            savedCount++;
+        }
+
+        if (savedCount > 0)
+        {
+            _log.Info($"출고용 직접입력 상품코드 매핑 저장: {savedCount}건");
+            rows = BuildOrderExportRowsEx(orders);
+            RefreshOrderExportPopupSummaryEx(orders);
+        }
+
+        return true;
+    }
+
     private string CurrentOrderExportMarketNameEx => string.IsNullOrWhiteSpace(_cboOrderExportMarketEx?.Text)
         ? ShipmentRequestOrderExportFormatterEx.DefaultMarketName
         : _cboOrderExportMarketEx.Text.Trim();
@@ -647,6 +736,7 @@ internal sealed class ShipmentRequestOrderRowEx
 {
     public string SupplierProductName { get; init; } = string.Empty;
     public string ProductOption { get; init; } = string.Empty;
+    public string ProductMatchKey { get; init; } = string.Empty;
     public string ProductCode { get; init; } = string.Empty;
     public string MarketName { get; init; } = string.Empty;
     public string ExportDate { get; init; } = string.Empty;
@@ -696,9 +786,13 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return parsed.Count > 0 ? parsed.Max() : DateTime.Today;
     }
 
-    public static IReadOnlyList<ShipmentRequestOrderRowEx> BuildRows(IEnumerable<Cafe24Order> orders, string marketName, string orderDateText)
+    public static IReadOnlyList<ShipmentRequestOrderRowEx> BuildRows(
+        IEnumerable<Cafe24Order> orders,
+        string marketName,
+        string orderDateText,
+        IReadOnlyDictionary<string, string>? manualProductCodes = null)
     {
-        var builtRows = orders.Select(order => BuildRow(order, marketName, orderDateText)).ToList();
+        var builtRows = orders.Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes)).ToList();
         var blankRows = builtRows.Where(row => string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
         var normalRows = builtRows.Where(row => !string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
         return blankRows.Concat(normalRows).ToList();
@@ -726,10 +820,19 @@ internal static class ShipmentRequestOrderExportFormatterEx
         string orderDateText,
         string filePath,
         bool includeSupplierProduct = false,
+        bool includeOption = false,
+        IReadOnlyDictionary<string, string>? manualProductCodes = null)
+    {
+        var rows = BuildRows(orders, marketName, orderDateText, manualProductCodes).ToList();
+        SaveRowsAsWorkbook(rows, filePath, includeSupplierProduct, includeOption);
+    }
+
+    public static void SaveRowsAsWorkbook(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        string filePath,
+        bool includeSupplierProduct = false,
         bool includeOption = false)
     {
-        var rows = BuildRows(orders, marketName, orderDateText).ToList();
-
         using var workbook = new XLWorkbook();
         var sheet = workbook.Worksheets.Add("Sheet1");
         WriteWorksheet(sheet, rows, includeSupplierProduct, includeOption);
@@ -797,10 +900,14 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return values.ToArray();
     }
 
-    private static ShipmentRequestOrderRowEx BuildRow(Cafe24Order order, string marketName, string orderDateText)
+    private static ShipmentRequestOrderRowEx BuildRow(
+        Cafe24Order order,
+        string marketName,
+        string orderDateText,
+        IReadOnlyDictionary<string, string>? manualProductCodes)
     {
         if (MarketplaceSourceKey.IsCoupang(order.MallId))
-            return BuildCoupangRow(order, marketName, orderDateText);
+            return BuildCoupangRow(order, marketName, orderDateText, manualProductCodes);
 
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = SelectReceiver(orderJson, order);
@@ -810,6 +917,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var optionText = ResolveOptionText(item);
         var baseProductCode = ResolveBaseProductCode(item, order);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+        var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
+        finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
 
         var detailAddress = receiver?["address2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -821,6 +930,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
         {
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
+            ProductMatchKey = productMatchKey,
             ProductCode = finalProductCode,
             MarketName = marketName,
             ExportDate = orderDateText,
@@ -834,7 +944,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         };
     }
 
-    private static ShipmentRequestOrderRowEx BuildCoupangRow(Cafe24Order order, string marketName, string orderDateText)
+    private static ShipmentRequestOrderRowEx BuildCoupangRow(
+        Cafe24Order order,
+        string marketName,
+        string orderDateText,
+        IReadOnlyDictionary<string, string>? manualProductCodes)
     {
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = orderJson?["receiver"] as JObject;
@@ -848,6 +962,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
                                   ?? order.ProductName;
         var baseProductCode = ResolveCoupangProductCode(item, order);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+        var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
+        finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
 
         var detailAddress = receiver?["addr2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -863,6 +979,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
         {
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
+            ProductMatchKey = productMatchKey,
             ProductCode = finalProductCode,
             MarketName = marketName,
             ExportDate = orderDateText,
@@ -1027,6 +1144,38 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return match.Success ? match.Groups[1].Value.ToUpperInvariant() : string.Empty;
     }
 
+    public static string BuildProductMappingKey(string? supplierProductName, string? optionText)
+    {
+        var product = NormalizeProductMappingPart(supplierProductName);
+        if (string.IsNullOrWhiteSpace(product))
+            return string.Empty;
+
+        return $"{product}|{NormalizeProductMappingPart(optionText)}";
+    }
+
+    private static string ApplyManualProductCode(
+        string productCode,
+        string productMatchKey,
+        IReadOnlyDictionary<string, string>? manualProductCodes)
+    {
+        if (!string.IsNullOrWhiteSpace(productCode))
+            return productCode;
+        if (string.IsNullOrWhiteSpace(productMatchKey) || manualProductCodes == null)
+            return string.Empty;
+
+        return manualProductCodes.TryGetValue(productMatchKey, out var mappedCode)
+            ? mappedCode.Trim().ToUpperInvariant()
+            : string.Empty;
+    }
+
+    private static string NormalizeProductMappingPart(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        return Regex.Replace(value.Trim(), "\\s+", " ").ToUpperInvariant();
+    }
+
     private static string ApplyOptionLetter(string baseProductCode, string optionText)
     {
         if (string.IsNullOrWhiteSpace(baseProductCode)) return string.Empty;
@@ -1130,6 +1279,131 @@ internal static class ShipmentRequestOrderExportFormatterEx
             .Replace("\n", " ")
             .Replace("\t", " ")
             .Trim();
+    }
+}
+
+internal sealed class OrderExportProductCodeMappingInputEx
+{
+    public string ProductKey { get; init; } = string.Empty;
+    public string SupplierProductName { get; init; } = string.Empty;
+    public string ProductOption { get; init; } = string.Empty;
+    public string ProductCode { get; init; } = string.Empty;
+}
+
+internal sealed class OrderExportProductCodeMappingDialogEx : Form
+{
+    private readonly DataGridView _grid;
+
+    public OrderExportProductCodeMappingDialogEx(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    {
+        Text = "직접입력 상품코드 등록";
+        StartPosition = FormStartPosition.CenterParent;
+        Size = new Size(920, 460);
+        MinimizeBox = false;
+        MaximizeBox = false;
+        BackColor = Color.White;
+
+        var description = new Label
+        {
+            AutoSize = false,
+            Dock = DockStyle.Top,
+            Height = 48,
+            Padding = new Padding(12, 10, 12, 4),
+            Text = "상품코드를 입력해 저장하면 다음 출고용 생성부터 같은 상품명/옵션에 자동 적용됩니다.",
+            ForeColor = Color.DimGray
+        };
+
+        _grid = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells,
+            SelectionMode = DataGridViewSelectionMode.CellSelect,
+            BackgroundColor = Color.White,
+            RowHeadersVisible = false
+        };
+
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "SupplierProductName",
+            HeaderText = "공급사상품명",
+            ReadOnly = true,
+            Width = 360
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "ProductOption",
+            HeaderText = "옵션",
+            ReadOnly = true,
+            Width = 240
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "ProductCode",
+            HeaderText = "상품코드 입력",
+            Width = 180
+        });
+
+        foreach (var row in rows)
+        {
+            var index = _grid.Rows.Add(row.SupplierProductName, row.ProductOption, "");
+            _grid.Rows[index].Tag = row.ProductMatchKey;
+        }
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 52,
+            FlowDirection = FlowDirection.RightToLeft,
+            Padding = new Padding(10),
+            BackColor = Color.FromArgb(245, 247, 250)
+        };
+
+        var btnSave = new Button
+        {
+            Text = "저장 후 계속",
+            Width = 120,
+            Height = 30,
+            DialogResult = DialogResult.OK
+        };
+        var btnSkip = new Button
+        {
+            Text = "이번엔 건너뛰기",
+            Width = 130,
+            Height = 30,
+            DialogResult = DialogResult.Cancel
+        };
+        buttons.Controls.Add(btnSave);
+        buttons.Controls.Add(btnSkip);
+
+        AcceptButton = btnSave;
+        CancelButton = btnSkip;
+        Controls.Add(_grid);
+        Controls.Add(description);
+        Controls.Add(buttons);
+    }
+
+    public List<OrderExportProductCodeMappingInputEx> GetMappings()
+    {
+        var mappings = new List<OrderExportProductCodeMappingInputEx>();
+        foreach (DataGridViewRow row in _grid.Rows)
+        {
+            if (row.IsNewRow) continue;
+            var productCode = row.Cells["ProductCode"].Value?.ToString()?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(productCode))
+                continue;
+
+            mappings.Add(new OrderExportProductCodeMappingInputEx
+            {
+                ProductKey = row.Tag?.ToString() ?? "",
+                SupplierProductName = row.Cells["SupplierProductName"].Value?.ToString() ?? "",
+                ProductOption = row.Cells["ProductOption"].Value?.ToString() ?? "",
+                ProductCode = productCode
+            });
+        }
+
+        return mappings;
     }
 }
 

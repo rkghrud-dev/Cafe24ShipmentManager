@@ -30,3 +30,15 @@ public class ShipmentRequestExportRow
     public string ShippingMessage { get; set; } = "";
     public string DetailAddress { get; set; } = "";
 }
+
+public class ShipmentRequestProductCodeMapping
+{
+    public long Id { get; set; }
+    public long AppUserId { get; set; }
+    public string ProductKey { get; set; } = "";
+    public string SupplierProductName { get; set; } = "";
+    public string ProductOption { get; set; } = "";
+    public string ProductCode { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+}

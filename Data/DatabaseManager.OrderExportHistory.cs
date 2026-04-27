@@ -41,6 +41,20 @@ public partial class DatabaseManager
 
             CREATE INDEX IF NOT EXISTS idx_sreb_user_created ON shipment_request_export_batches(AppUserId, CreatedAt);
             CREATE INDEX IF NOT EXISTS idx_srer_batch ON shipment_request_export_rows(BatchId, RowNumber);
+
+            CREATE TABLE IF NOT EXISTS shipment_request_product_code_mappings (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                AppUserId INTEGER DEFAULT 0,
+                ProductKey TEXT NOT NULL,
+                SupplierProductName TEXT DEFAULT '',
+                ProductOption TEXT DEFAULT '',
+                ProductCode TEXT DEFAULT '',
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                UNIQUE(AppUserId, ProductKey)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_srpcm_user_key ON shipment_request_product_code_mappings(AppUserId, ProductKey);
         ");
     }
 
@@ -95,5 +109,37 @@ public partial class DatabaseManager
             WHERE BatchId = @BatchId
             ORDER BY RowNumber, Id;",
             new { BatchId = batchId }).ToList();
+    }
+
+    public List<ShipmentRequestProductCodeMapping> GetShipmentRequestProductCodeMappings(long appUserId)
+    {
+        using var conn = GetConnection();
+        return conn.Query<ShipmentRequestProductCodeMapping>(@"
+            SELECT *
+            FROM shipment_request_product_code_mappings
+            WHERE AppUserId = @AppUserId
+            ORDER BY SupplierProductName, ProductOption;",
+            new { AppUserId = appUserId }).ToList();
+    }
+
+    public void UpsertShipmentRequestProductCodeMapping(ShipmentRequestProductCodeMapping mapping)
+    {
+        using var conn = GetConnection();
+        var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        if (string.IsNullOrWhiteSpace(mapping.CreatedAt))
+            mapping.CreatedAt = now;
+        mapping.UpdatedAt = now;
+
+        conn.Execute(@"
+            INSERT INTO shipment_request_product_code_mappings
+                (AppUserId, ProductKey, SupplierProductName, ProductOption, ProductCode, CreatedAt, UpdatedAt)
+            VALUES
+                (@AppUserId, @ProductKey, @SupplierProductName, @ProductOption, @ProductCode, @CreatedAt, @UpdatedAt)
+            ON CONFLICT(AppUserId, ProductKey) DO UPDATE SET
+                SupplierProductName = excluded.SupplierProductName,
+                ProductOption = excluded.ProductOption,
+                ProductCode = excluded.ProductCode,
+                UpdatedAt = excluded.UpdatedAt;",
+            mapping);
     }
 }
