@@ -147,7 +147,9 @@ static class Program
             RedirectUri = ReadString(marketSection, "RedirectUri", ReadString(cafe24Section, "RedirectUri", "")),
             ShopNo = ReadString(marketSection, "ShopNo", ReadString(cafe24Section, "ShopNo", "1")),
             Scope = ReadString(marketSection, "Scope", ReadString(cafe24Section, "Scope", "")),
-            TokenFilePath = tokenPath
+            TokenFilePath = tokenPath,
+            TokenProviderUrl = ReadString(marketSection, "TokenProviderUrl", ReadString(cafe24Section, "TokenProviderUrl", "")),
+            TokenProviderKey = ReadString(marketSection, "TokenProviderKey", ReadString(cafe24Section, "TokenProviderKey", ""))
         };
     }
 

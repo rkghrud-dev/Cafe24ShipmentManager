@@ -35,6 +35,8 @@ internal static class Cafe24SharedTokenStore
         config.ApiVersion = Pick(json, "ApiVersion", config.ApiVersion);
         config.ShopNo = PreferConfigured(config.ShopNo, json, "ShopNo");
         config.Scope = PreferConfigured(config.Scope, json, "Scope");
+        config.TokenProviderUrl = PreferConfigured(config.TokenProviderUrl, json, "TokenProviderUrl");
+        config.TokenProviderKey = PreferConfigured(config.TokenProviderKey, json, "TokenProviderKey");
         log?.Info($"공유 Cafe24 토큰 파일 로드: {path}");
     }
 
@@ -75,6 +77,8 @@ internal static class Cafe24SharedTokenStore
         json["ApiVersion"] = config.ApiVersion;
         json["ShopNo"] = config.ShopNo;
         json["Scope"] = config.Scope;
+        json["TokenProviderUrl"] = config.TokenProviderUrl;
+        json["TokenProviderKey"] = config.TokenProviderKey;
 
         if (markTokenRefresh || accessTokenChanged || string.IsNullOrWhiteSpace(json["UpdatedAt"]?.ToString()))
             json["UpdatedAt"] = now;

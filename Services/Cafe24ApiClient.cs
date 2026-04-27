@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -25,13 +26,18 @@ public class Cafe24Config
     public string ShopNo { get; set; } = "1";
     public string Scope { get; set; } = "";
     public string TokenFilePath { get; set; } = "";
+    public string TokenProviderUrl { get; set; } = "";
+    public string TokenProviderKey { get; set; } = "";
 }
 public class Cafe24ApiClient : IMarketplaceApiClient
 {
     private readonly HttpClient _http;
     private readonly Cafe24Config _config;
     private readonly AppLogger _log;
+    private DateTime _lastTokenProviderCheckUtc = DateTime.MinValue;
+    private static readonly HttpClient TokenProviderHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
     private const int MaxRetries = 3;
+    private const int TokenProviderCheckSeconds = 60;
     // 택배사 코드 매핑 (Cafe24 기준)
     // 이 쇼핑몰에 등록된 택배사 코드 (admin/carriers API 기준)
     public static readonly Dictionary<string, string> ShippingCompanyCodes = new()
@@ -68,6 +74,119 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             : new AuthenticationHeaderValue("Bearer", _config.AccessToken);
     }
 
+    private async Task<bool> ReloadAccessTokenAsync(bool forceProviderRefresh = false)
+    {
+        if (!string.IsNullOrWhiteSpace(_config.TokenProviderUrl))
+            return await ReloadAccessTokenFromProviderAsync(forceProviderRefresh);
+
+        return ReloadAccessTokenFromFile();
+    }
+
+    private async Task<bool> ReloadAccessTokenFromProviderAsync(bool forceProviderRefresh)
+    {
+        if (string.IsNullOrWhiteSpace(_config.TokenProviderUrl))
+            return false;
+
+        var now = DateTime.UtcNow;
+        if (!forceProviderRefresh &&
+            !string.IsNullOrWhiteSpace(_config.AccessToken) &&
+            (now - _lastTokenProviderCheckUtc).TotalSeconds < TokenProviderCheckSeconds)
+            return false;
+
+        _lastTokenProviderCheckUtc = now;
+
+        try
+        {
+            var url = BuildTokenProviderUrl();
+            using var response = await TokenProviderHttp.GetAsync(url);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                _log.Warn($"[{ResolveMarketDisplayName()}] Google Apps Script 토큰 조회 실패: {(int)response.StatusCode} {ClipForLog(body)}");
+                return false;
+            }
+
+            var json = JObject.Parse(body);
+            if (json["ok"]?.Type == JTokenType.Boolean && json["ok"]!.Value<bool>() == false)
+            {
+                _log.Warn($"[{ResolveMarketDisplayName()}] Google Apps Script 토큰 오류: {ClipForLog(body)}");
+                return false;
+            }
+
+            var latestAccessToken = PickFirst(json, "AccessToken", "access_token");
+            if (string.IsNullOrWhiteSpace(latestAccessToken))
+            {
+                _log.Warn($"[{ResolveMarketDisplayName()}] Google Apps Script 응답에 AccessToken이 없습니다.");
+                return false;
+            }
+
+            var changed = !string.Equals(latestAccessToken, _config.AccessToken, StringComparison.Ordinal);
+            _config.AccessToken = latestAccessToken;
+
+            var latestApiVersion = PickFirst(json, "ApiVersion", "api_version");
+            if (!string.IsNullOrWhiteSpace(latestApiVersion))
+                _config.ApiVersion = latestApiVersion;
+
+            var latestShopNo = PickFirst(json, "ShopNo", "shop_no");
+            if (!string.IsNullOrWhiteSpace(latestShopNo))
+                _config.ShopNo = latestShopNo;
+
+            ApplyAccessTokenHeader();
+            ApplyApiVersionHeader();
+
+            if (changed)
+                _log.Info($"[{ResolveMarketDisplayName()}] Google Apps Script 최신 Cafe24 Access Token 적용");
+
+            return changed;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"[{ResolveMarketDisplayName()}] Google Apps Script 토큰 조회 실패: {ex.Message}");
+            return false;
+        }
+    }
+
+    private string BuildTokenProviderUrl()
+    {
+        var url = _config.TokenProviderUrl.Trim();
+        url = AppendQueryParameter(url, "mall", _config.MallId);
+        if (!string.IsNullOrWhiteSpace(_config.TokenProviderKey))
+            url = AppendQueryParameter(url, "key", _config.TokenProviderKey);
+        url = AppendQueryParameter(url, "_", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture));
+        return url;
+    }
+
+    private static string AppendQueryParameter(string url, string name, string value)
+    {
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(value))
+            return url;
+
+        var separator = url.Contains('?')
+            ? (url.EndsWith('?') || url.EndsWith('&') ? "" : "&")
+            : "?";
+        return url + separator + Uri.EscapeDataString(name) + "=" + Uri.EscapeDataString(value);
+    }
+
+    private static string PickFirst(JObject json, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var value = json[name]?.ToString();
+            if (!string.IsNullOrWhiteSpace(value))
+                return value;
+        }
+
+        return "";
+    }
+
+    private static string ClipForLog(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        value = value.Replace("\r", " ").Replace("\n", " ").Trim();
+        return value.Length <= 300 ? value : value.Substring(0, 300) + "...";
+    }
     private bool ReloadAccessTokenFromFile()
     {
         var path = ResolveComparablePath(_config.TokenFilePath);
@@ -342,7 +461,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
         {
             try
             {
-                ReloadAccessTokenFromFile();
+                await ReloadAccessTokenAsync();
                 var resp = await action();
 
                 if (resp.StatusCode == HttpStatusCode.Unauthorized)
@@ -350,19 +469,19 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                     var body = await resp.Content.ReadAsStringAsync();
                     if (IsInvalidAccessTokenResponse(body))
                     {
-                        if (!retriedAfterJsonReload && ReloadAccessTokenFromFile())
+                        if (!retriedAfterJsonReload && await ReloadAccessTokenAsync(forceProviderRefresh: true))
                         {
                             retriedAfterJsonReload = true;
                             resp.Dispose();
-                            _log.Info($"[{ResolveMarketDisplayName()}] 갱신된 Cafe24 JSON 적용 후 API 재시도");
+                            _log.Info($"[{ResolveMarketDisplayName()}] 갱신된 Cafe24 Access Token 적용 후 API 재시도");
                             continue;
                         }
 
-                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 만료/무효 감지. 자동 갱신은 비활성화되어 있습니다. Cafe24Auth에서 JSON을 갱신하면 다음 요청에서 다시 읽습니다.");
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 만료/무효 감지. TokenProviderUrl 또는 Cafe24Auth JSON을 갱신한 뒤 다시 시도하세요.");
                     }
                     else
                     {
-                        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 인증 오류 감지. Cafe24Auth에서 JSON을 갱신한 뒤 다시 시도하세요.");
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 인증 오류 감지. TokenProviderUrl 설정 또는 Cafe24Auth JSON을 확인하세요.");
                     }
 
                     return resp;
@@ -384,7 +503,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                     if (TryAdjustApiVersion(body))
                     {
                         adjustedApiVersion = true;
-                        ReloadAccessTokenFromFile();
+                        await ReloadAccessTokenAsync();
                         resp = await action();
                     }
                 }

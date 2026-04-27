@@ -240,7 +240,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
             String mallId = credential.optString("MallId", "").trim();
         String accessToken = credential.optString("AccessToken", "").trim();
-
         String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
 
@@ -674,6 +673,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         }
         String accessToken = credential.optString("AccessToken", "").trim();
+        String tokenProviderUrl = credential.optString("TokenProviderUrl", "").trim();
 
         String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
@@ -682,7 +682,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
             apiVersion = DEFAULT_CAFE24_API_VERSION;
 
         }
-        if (accessToken.isEmpty()) {
+        if (accessToken.isEmpty() && tokenProviderUrl.isEmpty()) {
 
             throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED);
 
@@ -706,30 +706,70 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         Cafe24MarketConfig config = credentialStore.getCafe24Market(slot);
 
-        if (config == null || config.sourceUri.isEmpty()) {
+        String resolvedJson = storedJson;
 
-            return storedJson;
+        if (config != null && !config.sourceUri.isEmpty()) {
+
+            String sourceJson = readCafe24SourceJson(config.sourceUri);
+
+            if (!sourceJson.isEmpty()) {
+
+                try {
+
+                    String normalizedJson = preserveStoredCafe24UpdatedAt(
+                            normalizeCafe24JsonForStorage(sourceJson, false),
+                            storedJson
+                    );
+
+                    if (!normalizedJson.equals(config.json)) {
+
+                        credentialStore.saveCafe24Json(slot, normalizedJson, config.sourceLabel, config.sourceUri);
+
+                    }
+
+                    resolvedJson = normalizedJson;
+
+                } catch (Exception ignored) {
+
+                    resolvedJson = storedJson;
+
+                }
+
+            }
 
         }
 
-        String sourceJson = readCafe24SourceJson(config.sourceUri);
+        return refreshCafe24JsonFromTokenProvider(slot, resolvedJson, config);
 
-        if (sourceJson.isEmpty()) {
+    }
 
-            return storedJson;
+    private String refreshCafe24JsonFromTokenProvider(String slot, String rawJson, Cafe24MarketConfig config) {
+
+        if (rawJson == null || rawJson.trim().isEmpty()) {
+
+            return rawJson;
 
         }
 
         try {
 
-            String normalizedJson = preserveStoredCafe24UpdatedAt(
-                    normalizeCafe24JsonForStorage(sourceJson, false),
-                    storedJson
-            );
+            JSONObject credential = new JSONObject(rawJson);
 
-            if (!normalizedJson.equals(config.json)) {
+            if (credential.optString("TokenProviderUrl", "").trim().isEmpty()) {
 
-                credentialStore.saveCafe24Json(slot, normalizedJson, config.sourceLabel, config.sourceUri);
+                return rawJson;
+
+            }
+
+            JSONObject updated = applyCafe24TokenProvider(credential);
+
+            String normalizedJson = normalizeCafe24JsonForStorage(updated.toString(), false);
+
+            if (!normalizedJson.equals(rawJson)) {
+
+                String sourceLabel = config == null ? "Google Apps Script" : config.sourceLabel;
+                String sourceUri = config == null ? "" : config.sourceUri;
+                credentialStore.saveCafe24Json(slot, normalizedJson, sourceLabel, sourceUri);
 
             }
 
@@ -737,12 +777,107 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         } catch (Exception ignored) {
 
-            return storedJson;
+            return rawJson;
 
         }
 
     }
 
+    private JSONObject applyCafe24TokenProvider(JSONObject credential) throws Exception {
+
+        String providerUrl = credential.optString("TokenProviderUrl", "").trim();
+
+        if (providerUrl.isEmpty()) {
+
+            return credential;
+
+        }
+
+        String mallId = credential.optString("MallId", "").trim();
+
+        if (mallId.isEmpty()) {
+
+            throw new Exception("MallId가 없습니다.");
+
+        }
+
+        String providerKey = firstNonEmpty(
+                credential.optString("TokenProviderKey", ""),
+                credential.optString("ProviderKey", "")
+        );
+
+        Uri.Builder builder = Uri.parse(providerUrl).buildUpon()
+                .appendQueryParameter("mall", mallId);
+
+        if (!providerKey.isEmpty()) {
+
+            builder.appendQueryParameter("key", providerKey);
+
+        }
+
+        builder.appendQueryParameter("_", String.valueOf(System.currentTimeMillis() / 1000L));
+
+        HttpResult response = executeJsonRequest("GET", builder.build().toString(), null, Collections.emptyMap());
+
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+
+            throw new Exception("Google Apps Script 토큰 조회 실패 " + response.statusCode + ": " + clip(response.body));
+
+        }
+
+        JSONObject tokenJson = new JSONObject(response.body);
+
+        if (tokenJson.optBoolean("ok", true) == false) {
+
+            throw new Exception("Google Apps Script 토큰 오류: " + clip(response.body));
+
+        }
+
+        String accessToken = firstNonEmpty(
+                tokenJson.optString("AccessToken", ""),
+                tokenJson.optString("access_token", "")
+        );
+
+        if (accessToken.isEmpty()) {
+
+            throw new Exception("Google Apps Script 응답에 AccessToken이 없습니다.");
+
+        }
+
+        credential.put("AccessToken", accessToken);
+
+        String apiVersion = firstNonEmpty(
+                tokenJson.optString("ApiVersion", ""),
+                tokenJson.optString("api_version", "")
+        );
+
+        if (!apiVersion.isEmpty()) {
+
+            credential.put("ApiVersion", apiVersion);
+
+        }
+
+        String shopNo = firstNonEmpty(
+                tokenJson.optString("ShopNo", ""),
+                tokenJson.optString("shop_no", "")
+        );
+
+        if (!shopNo.isEmpty()) {
+
+            credential.put("ShopNo", shopNo);
+
+        }
+
+        String updatedAt = firstNonEmpty(
+                tokenJson.optString("UpdatedAt", ""),
+                tokenJson.optString("updated_at", "")
+        );
+
+        credential.put("UpdatedAt", updatedAt.isEmpty() ? Instant.now().toString() : updatedAt);
+
+        return credential;
+
+    }
     private String preserveStoredCafe24UpdatedAt(String normalizedJson, String storedJson) {
 
         try {
@@ -820,6 +955,11 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         }
         String accessToken = credential.optString("AccessToken", "").trim();
+        String tokenProviderUrl = credential.optString("TokenProviderUrl", "").trim();
+        if (accessToken.isEmpty() && !tokenProviderUrl.isEmpty()) {
+            credential = applyCafe24TokenProvider(credential);
+            accessToken = credential.optString("AccessToken", "").trim();
+        }
 
         String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
