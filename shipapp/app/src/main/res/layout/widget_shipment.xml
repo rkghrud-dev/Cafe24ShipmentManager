@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widgetContainer"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_widget"
     android:orientation="vertical"
-    android:padding="14dp">
+    android:padding="10dp">
 
-    <!-- 앱 이름 + 업데이트 시간 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -17,9 +17,9 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="ShipApp"
-            android:textColor="#1C1C1E"
-            android:textSize="12sp"
+            android:text="출고 현황"
+            android:textColor="@color/ship_text_primary"
+            android:textSize="13sp"
             android:textStyle="bold" />
 
         <TextView
@@ -27,103 +27,175 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="--:--"
-            android:textColor="#8E8E93"
+            android:textColor="@color/ship_text_secondary"
             android:textSize="10sp" />
     </LinearLayout>
 
-    <!-- 전체 대기 건수 -->
-    <TextView
-        android:id="@+id/widgetTotalCount"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="-- 건"
-        android:textColor="#007AFF"
-        android:textSize="26sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="출고 대기"
-        android:textColor="#8E8E93"
-        android:textSize="10sp" />
-
-    <!-- 마켓별 분류 -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="0dp"
         android:layout_marginTop="8dp"
+        android:layout_weight="1"
+        android:gravity="center_vertical"
         android:orientation="horizontal">
 
+        <TextView
+            android:id="@+id/widgetTotalCount"
+            android:layout_width="54dp"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:text="--"
+            android:textColor="@color/ship_primary"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
         <LinearLayout
+            android:id="@+id/widgetMarket1Tile"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:background="@drawable/bg_inline_panel"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="5dp">
 
             <TextView
-                android:id="@+id/widgetHomeCount"
-                android:layout_width="wrap_content"
+                android:id="@+id/widgetMarket1Name"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="--"
-                android:textColor="#1C1C1E"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
                 android:text="홈런"
-                android:textColor="#8E8E93"
-                android:textSize="9sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/widgetPrepareCount"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="--"
-                android:textColor="#1C1C1E"
-                android:textSize="14sp"
+                android:textColor="@color/ship_text_secondary"
+                android:textSize="9sp"
                 android:textStyle="bold" />
 
             <TextView
-                android:layout_width="wrap_content"
+                android:id="@+id/widgetMarket1Count"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="준비몰"
-                android:textColor="#8E8E93"
-                android:textSize="9sp" />
+                android:gravity="center"
+                android:text="--"
+                android:textColor="@color/ship_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/widgetMarket2Tile"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:background="@drawable/bg_inline_panel"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="5dp">
 
             <TextView
-                android:id="@+id/widgetCoupangCount"
-                android:layout_width="wrap_content"
+                android:id="@+id/widgetMarket2Name"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="--"
-                android:textColor="#1C1C1E"
-                android:textSize="14sp"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="준비"
+                android:textColor="@color/ship_text_secondary"
+                android:textSize="9sp"
                 android:textStyle="bold" />
 
             <TextView
-                android:layout_width="wrap_content"
+                android:id="@+id/widgetMarket2Count"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="--"
+                android:textColor="@color/ship_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/widgetMarket3Tile"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_inline_panel"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="5dp">
+
+            <TextView
+                android:id="@+id/widgetMarket3Name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
                 android:text="쿠팡"
-                android:textColor="#8E8E93"
-                android:textSize="9sp" />
-        </LinearLayout>
-    </LinearLayout>
+                android:textColor="@color/ship_text_secondary"
+                android:textSize="9sp"
+                android:textStyle="bold" />
 
+            <TextView
+                android:id="@+id/widgetMarket3Count"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="--"
+                android:textColor="@color/ship_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/widgetMarket4Tile"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_inline_panel"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="5dp">
+
+            <TextView
+                android:id="@+id/widgetMarket4Name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="전체"
+                android:textColor="@color/ship_text_secondary"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widgetMarket4Count"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="--"
+                android:textColor="@color/ship_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/widgetRefreshButton"
+            android:layout_width="40dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
+            android:background="@drawable/bg_inline_panel"
+            android:contentDescription="주문 새로고침"
+            android:gravity="center"
+            android:text="↻"
+            android:textColor="@color/ship_primary"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+    </LinearLayout>
 </LinearLayout>

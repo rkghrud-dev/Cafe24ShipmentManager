@@ -31,6 +31,8 @@ android {
         buildConfigField "String", "GOOGLE_SHEETS_CLIENT_ID", buildConfigString(localProperties.getProperty("shipapp.googleSheetsClientId", ""))
         buildConfigField "String", "GOOGLE_SHEETS_CLIENT_SECRET", buildConfigString(localProperties.getProperty("shipapp.googleSheetsClientSecret", ""))
         buildConfigField "String", "GOOGLE_SHEETS_REFRESH_TOKEN", buildConfigString(localProperties.getProperty("shipapp.googleSheetsRefreshToken", ""))
+        buildConfigField "String", "GOOGLE_SHEETS_SA_EMAIL", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSaEmail", ""))
+        buildConfigField "String", "GOOGLE_SHEETS_SA_PRIVATE_KEY", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSaPrivateKey", ""))
     }
 
     buildTypes {

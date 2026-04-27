@@ -1,5 +1,6 @@
 package com.rkghrud.shipapp.data;
 
+import org.json.JSONObject;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -10,6 +11,33 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class GoogleSheetsTrackingMatcherTest {
+
+    @Test
+    public void buildServiceAccountPayloadJson_usesClockSkewAndShortTtl() throws Exception {
+        long now = 1_800_000_000L;
+
+        JSONObject payload = new JSONObject(
+                GoogleSheetsTrackingMatcher.buildServiceAccountPayloadJson(
+                        "shipapp-test@example.iam.gserviceaccount.com",
+                        now
+                )
+        );
+
+        assertEquals("shipapp-test@example.iam.gserviceaccount.com", payload.getString("iss"));
+        assertEquals(now - 60L, payload.getLong("iat"));
+        assertEquals(now + 55L * 60L, payload.getLong("exp"));
+        assertTrue(payload.getLong("exp") - payload.getLong("iat") <= 3600L);
+    }
+
+    @Test
+    public void withServiceAccountAuthHint_explainsInvalidGrantClockCause() {
+        String message = GoogleSheetsTrackingMatcher.withServiceAccountAuthHint(
+                "구글 서비스계정 인증 실패 400: {\"error\":\"invalid_grant\",\"error_description\":\"Token must be a short-lived token\"}"
+        );
+
+        assertTrue(message.contains("Android 기기 날짜/시간"));
+        assertTrue(message.contains("서비스계정 JWT"));
+    }
 
     @Test
     public void parseRowsFromSheetsResponse_readsBatchGetPayload() throws Exception {

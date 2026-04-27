@@ -30,6 +30,7 @@ public class DispatchOrder {
 
     public String trackingNumber = "";
     public String shippingCompanyName = "CJ대한통운";
+    public String cafe24ShippingCode = "";
     public String marketSourceLabel = "";
     public String marketOrderReference = "";
     public boolean selected = false;
@@ -143,12 +144,16 @@ public class DispatchOrder {
             case "ACCEPT":
                 return "배송준비중";
             case "N21":
+            case "STANDBY":
             case "INSTRUCT":
                 return "배송대기";
             case "N22":
                 return "배송보류";
             case "N30":
+            case "SHIPPING":
                 return "배송중";
+            case "SHIPPED":
+                return "배송완료";
             case "C00":
                 return "취소신청";
             case "E00":
@@ -166,9 +171,12 @@ public class DispatchOrder {
             case "ACCEPT":
                 return STATUS_FILTER_PREPARING;
             case "N21":
+            case "STANDBY":
             case "INSTRUCT":
                 return STATUS_FILTER_STANDBY;
             case "N30":
+            case "SHIPPING":
+            case "SHIPPED":
                 return STATUS_FILTER_SHIPPING;
             case "C00":
                 return STATUS_FILTER_CANCEL_REQUEST;

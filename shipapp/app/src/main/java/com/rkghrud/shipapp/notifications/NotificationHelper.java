@@ -15,10 +15,19 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 
+import com.rkghrud.shipapp.FeatureFlags;
 import com.rkghrud.shipapp.MainActivity;
 import com.rkghrud.shipapp.data.AlertPrefs;
+import com.rkghrud.shipapp.data.Cafe24MarketConfig;
+import com.rkghrud.shipapp.data.CredentialStore;
+import com.rkghrud.shipapp.data.DispatchOrder;
 import com.rkghrud.shipapp.data.ShipmentDashboardSnapshot;
+import com.rkghrud.shipapp.widget.ShipmentCompactWidget;
 import com.rkghrud.shipapp.widget.ShipmentWidget;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public final class NotificationHelper {
     public static final String CHANNEL_POLLING_VIBRATE = "ship_polling_vibrate";
@@ -40,6 +49,46 @@ public final class NotificationHelper {
     public static final String KEY_WIDGET_PREPARE = "widget_prepare";
     public static final String KEY_WIDGET_COUPANG = "widget_coupang";
     public static final String KEY_WIDGET_TIME = "widget_updated_at";
+    public static final String KEY_WIDGET_MARKET1_NAME = "widget_market1_name";
+    public static final String KEY_WIDGET_MARKET1_COUNT = "widget_market1_count";
+    public static final String KEY_WIDGET_MARKET1_KEY = "widget_market1_key";
+    public static final String KEY_WIDGET_MARKET2_NAME = "widget_market2_name";
+    public static final String KEY_WIDGET_MARKET2_COUNT = "widget_market2_count";
+    public static final String KEY_WIDGET_MARKET2_KEY = "widget_market2_key";
+    public static final String KEY_WIDGET_MARKET3_NAME = "widget_market3_name";
+    public static final String KEY_WIDGET_MARKET3_COUNT = "widget_market3_count";
+    public static final String KEY_WIDGET_MARKET3_KEY = "widget_market3_key";
+    public static final String KEY_WIDGET_MARKET4_NAME = "widget_market4_name";
+    public static final String KEY_WIDGET_MARKET4_COUNT = "widget_market4_count";
+    public static final String KEY_WIDGET_MARKET4_KEY = "widget_market4_key";
+
+    public static String widgetMarketNameKey(String marketKey) {
+        return "widget_market_name_" + normalizeWidgetMarketKey(marketKey);
+    }
+
+    public static String widgetMarketCountKey(String marketKey) {
+        return "widget_market_count_" + normalizeWidgetMarketKey(marketKey);
+    }
+
+    private static String normalizeWidgetMarketKey(String marketKey) {
+        String safe = marketKey == null ? "" : marketKey.trim();
+        if (safe.isEmpty()) {
+            return "empty";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < safe.length(); i++) {
+            char c = safe.charAt(i);
+            if ((c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '_') {
+                builder.append(c);
+            } else {
+                builder.append('_');
+            }
+        }
+        return builder.toString();
+    }
 
     private NotificationHelper() {
     }
@@ -130,6 +179,8 @@ public final class NotificationHelper {
         int home = 0;
         int prepare = 0;
         int coupang = 0;
+        LinkedHashMap<String, WidgetMarketCount> markets = buildWidgetMarkets(context);
+
         for (var shipment : snapshot.getShipments()) {
             String label = shipment.getMarketLabel();
             if (label != null && label.contains("홈런")) {
@@ -139,33 +190,179 @@ public final class NotificationHelper {
             } else if (label != null && label.contains("쿠팡")) {
                 coupang++;
             }
+            WidgetMarketCount market = resolveWidgetMarket(markets, label);
+            if (market != null) {
+                market.count++;
+            }
         }
 
         String time = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.KOREA)
                 .format(new java.util.Date());
+        WidgetMarketCount[] top = topWidgetMarkets(markets);
 
-        context.getSharedPreferences(PREFS_WIDGET, Context.MODE_PRIVATE)
+        writeWidgetPrefs(context, snapshot.getActionCount(), home, prepare, coupang, time, top, markets);
+    }
+
+    public static void saveWidgetDataFromDispatchOrders(Context context, List<DispatchOrder> orders, int totalCount) {
+        int home = 0;
+        int prepare = 0;
+        int coupang = 0;
+        LinkedHashMap<String, WidgetMarketCount> markets = buildWidgetMarkets(context);
+
+        for (DispatchOrder order : orders) {
+            String label = order.marketLabel;
+            if (label != null && label.contains("홈런")) {
+                home++;
+            } else if (label != null && label.contains("준비")) {
+                prepare++;
+            } else if (label != null && label.contains("쿠팡")) {
+                coupang++;
+            }
+            WidgetMarketCount market = resolveWidgetMarket(markets, label);
+            if (market != null) {
+                market.count++;
+            }
+        }
+
+        String time = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.KOREA)
+                .format(new java.util.Date());
+        WidgetMarketCount[] top = topWidgetMarkets(markets);
+
+        writeWidgetPrefs(context, totalCount, home, prepare, coupang, time, top, markets);
+    }
+
+    private static void writeWidgetPrefs(Context context, int total, int home, int prepare, int coupang,
+                                         String time, WidgetMarketCount[] top,
+                                         LinkedHashMap<String, WidgetMarketCount> markets) {
+        var editor = context.getSharedPreferences(PREFS_WIDGET, Context.MODE_PRIVATE)
                 .edit()
-                .putInt(KEY_WIDGET_TOTAL, snapshot.getActionCount())
+                .putInt(KEY_WIDGET_TOTAL, total)
                 .putInt(KEY_WIDGET_HOME, home)
                 .putInt(KEY_WIDGET_PREPARE, prepare)
                 .putInt(KEY_WIDGET_COUPANG, coupang)
                 .putString(KEY_WIDGET_TIME, time)
-                .apply();
+                .putString(KEY_WIDGET_MARKET1_NAME, top[0].name)
+                .putInt(KEY_WIDGET_MARKET1_COUNT, top[0].count)
+                .putString(KEY_WIDGET_MARKET1_KEY, top[0].key)
+                .putString(KEY_WIDGET_MARKET2_NAME, top[1].name)
+                .putInt(KEY_WIDGET_MARKET2_COUNT, top[1].count)
+                .putString(KEY_WIDGET_MARKET2_KEY, top[1].key)
+                .putString(KEY_WIDGET_MARKET3_NAME, top[2].name)
+                .putInt(KEY_WIDGET_MARKET3_COUNT, top[2].count)
+                .putString(KEY_WIDGET_MARKET3_KEY, top[2].key)
+                .putString(KEY_WIDGET_MARKET4_NAME, top[3].name)
+                .putInt(KEY_WIDGET_MARKET4_COUNT, countForWidgetMarket(top[3], total))
+                .putString(KEY_WIDGET_MARKET4_KEY, top[3].key)
+                .putString(widgetMarketNameKey(MainActivity.MARKET_FILTER_ALL), "전체")
+                .putInt(widgetMarketCountKey(MainActivity.MARKET_FILTER_ALL), total);
+        for (WidgetMarketCount market : markets.values()) {
+            editor.putString(widgetMarketNameKey(market.key), market.name)
+                    .putInt(widgetMarketCountKey(market.key), market.count);
+        }
+        editor.apply();
+    }
+
+    private static LinkedHashMap<String, WidgetMarketCount> buildWidgetMarkets(Context context) {
+        LinkedHashMap<String, WidgetMarketCount> markets = new LinkedHashMap<>();
+        CredentialStore store = new CredentialStore(context);
+        for (Cafe24MarketConfig config : store.getActiveCafe24Markets()) {
+            markets.put(config.key, new WidgetMarketCount(shortMarketName(config.displayName), config.key));
+        }
+        if (FeatureFlags.ENABLE_COUPANG && store.getCoupangCredentials().isComplete()) {
+            markets.put("coupang", new WidgetMarketCount("쿠팡", "coupang"));
+        }
+        addFallbackMarket(markets, "홈런", CredentialStore.SLOT_CAFE24_HOME);
+        addFallbackMarket(markets, "준비", CredentialStore.SLOT_CAFE24_PREPARE);
+        addFallbackMarket(markets, "쿠팡", "coupang");
+        return markets;
+    }
+
+    private static void addFallbackMarket(LinkedHashMap<String, WidgetMarketCount> markets, String name, String key) {
+        if (markets.size() < 4 && !markets.containsKey(key)) {
+            markets.put(key, new WidgetMarketCount(name, key));
+        }
+    }
+
+    private static WidgetMarketCount resolveWidgetMarket(LinkedHashMap<String, WidgetMarketCount> markets, String label) {
+        String safeLabel = label == null ? "" : label;
+        for (WidgetMarketCount market : markets.values()) {
+            if (!market.name.isEmpty() && safeLabel.contains(market.name)) {
+                return market;
+            }
+            if (CredentialStore.SLOT_CAFE24_HOME.equals(market.key) && safeLabel.contains("홈런")) {
+                return market;
+            }
+            if (CredentialStore.SLOT_CAFE24_PREPARE.equals(market.key) && safeLabel.contains("준비")) {
+                return market;
+            }
+            if ("coupang".equals(market.key) && safeLabel.contains("쿠팡")) {
+                return market;
+            }
+        }
+        return null;
+    }
+
+    private static WidgetMarketCount[] topWidgetMarkets(LinkedHashMap<String, WidgetMarketCount> markets) {
+        WidgetMarketCount[] result = new WidgetMarketCount[] {
+                new WidgetMarketCount("홈런", CredentialStore.SLOT_CAFE24_HOME),
+                new WidgetMarketCount("준비", CredentialStore.SLOT_CAFE24_PREPARE),
+                new WidgetMarketCount("쿠팡", "coupang"),
+                new WidgetMarketCount("전체", MainActivity.MARKET_FILTER_ALL)
+        };
+        int index = 0;
+        for (Map.Entry<String, WidgetMarketCount> entry : markets.entrySet()) {
+            if (index >= result.length) {
+                break;
+            }
+            result[index++] = entry.getValue();
+        }
+        return result;
+    }
+
+    private static int countForWidgetMarket(WidgetMarketCount market, int total) {
+        if (market != null && MainActivity.MARKET_FILTER_ALL.equals(market.key)) {
+            return total;
+        }
+        return market == null ? 0 : market.count;
+    }
+
+    private static String shortMarketName(String name) {
+        String safe = name == null ? "" : name.trim();
+        if (safe.endsWith("마켓")) {
+            return safe.substring(0, safe.length() - 2);
+        }
+        return safe.isEmpty() ? "마켓" : safe;
+    }
+
+    private static final class WidgetMarketCount {
+        final String name;
+        final String key;
+        int count;
+
+        WidgetMarketCount(String name, String key) {
+            this.name = name;
+            this.key = key;
+        }
     }
 
     public static void updateWidget(Context context) {
         try {
             AppWidgetManager manager = AppWidgetManager.getInstance(context);
-            int[] ids = manager.getAppWidgetIds(new ComponentName(context, ShipmentWidget.class));
-            if (ids.length > 0) {
-                Intent intent = new Intent(context, ShipmentWidget.class);
-                intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
-                intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids);
-                context.sendBroadcast(intent);
-            }
+            updateWidgetProvider(context, manager, ShipmentWidget.class);
+            updateWidgetProvider(context, manager, ShipmentCompactWidget.class);
         } catch (Exception ignored) {
         }
+    }
+
+    private static void updateWidgetProvider(Context context, AppWidgetManager manager, Class<?> providerClass) {
+        int[] ids = manager.getAppWidgetIds(new ComponentName(context, providerClass));
+        if (ids.length == 0) {
+            return;
+        }
+        Intent intent = new Intent(context, providerClass);
+        intent.setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE);
+        intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids);
+        context.sendBroadcast(intent);
     }
 }
 

@@ -1,5 +1,7 @@
 package com.rkghrud.shipapp.data;
 
+import android.util.Base64;
+
 import com.rkghrud.shipapp.BuildConfig;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -15,6 +17,10 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -38,6 +44,11 @@ public final class GoogleSheetsTrackingMatcher {
     private static final String CLIENT_ID = BuildConfig.GOOGLE_SHEETS_CLIENT_ID;
     private static final String CLIENT_SECRET = BuildConfig.GOOGLE_SHEETS_CLIENT_SECRET;
     private static final String REFRESH_TOKEN = BuildConfig.GOOGLE_SHEETS_REFRESH_TOKEN;
+    private static final String SA_EMAIL = BuildConfig.GOOGLE_SHEETS_SA_EMAIL;
+    private static final String SA_PRIVATE_KEY = BuildConfig.GOOGLE_SHEETS_SA_PRIVATE_KEY;
+    private static final String SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+    private static final long SERVICE_ACCOUNT_IAT_SKEW_SECONDS = 60L;
+    private static final long SERVICE_ACCOUNT_TOKEN_TTL_SECONDS = 55L * 60L;
     private static final String CJ_SHIPPING_COMPANY = "CJ대한통운";
     private static final int DEFAULT_VENDOR_COLUMN_INDEX = 2;
     private static final int DEFAULT_RECIPIENT_NAME_COLUMN_INDEX = 5;
@@ -68,6 +79,9 @@ public final class GoogleSheetsTrackingMatcher {
             "택배사", "배송사", "운송사", "택배", "배송업체", "운송업체"
     };
 
+    private static String cachedAccessToken = "";
+    private static long cachedTokenExpiry = 0L;
+
     private GoogleSheetsTrackingMatcher() {
     }
 
@@ -77,7 +91,21 @@ public final class GoogleSheetsTrackingMatcher {
         }
 
         ensureConfigured();
-        String accessToken = refreshAccessToken();
+        String accessToken = getCachedAccessToken();
+        try {
+            return applyToOrdersWithToken(accessToken, orders);
+        } catch (Exception ex) {
+            String message = ex.getMessage() == null ? "" : ex.getMessage();
+            if (message.contains("401") || message.contains("인증 실패")) {
+                invalidateAccessToken();
+                accessToken = getCachedAccessToken();
+                return applyToOrdersWithToken(accessToken, orders);
+            }
+            throw ex;
+        }
+    }
+
+    private static MatchResult applyToOrdersWithToken(String accessToken, List<DispatchOrder> orders) throws Exception {
         ParsedSheet trackingSheet = scopeParsedSheetToOrders(readLiveSheet(accessToken, LIVE_TRACKING_SHEET_NAME, false), orders);
         ParsedSheet pendingSheet = scopeParsedSheetToOrders(readLiveSheet(accessToken, LIVE_PENDING_SHEET_NAME, true), orders);
         ParsedSheet combinedSheet = mergeParsedSheets(trackingSheet, pendingSheet);
@@ -614,18 +642,158 @@ public final class GoogleSheetsTrackingMatcher {
         return !NON_SPECIFIC_FALLBACK_NAMES.contains(name.trim());
     }
 
+    private static boolean isServiceAccountConfigured() {
+        return SA_EMAIL != null && !SA_EMAIL.trim().isEmpty()
+                && SA_PRIVATE_KEY != null && !SA_PRIVATE_KEY.trim().isEmpty();
+    }
+
+    private static boolean isOAuthConfigured() {
+        return CLIENT_ID != null && !CLIENT_ID.trim().isEmpty()
+                && CLIENT_SECRET != null && !CLIENT_SECRET.trim().isEmpty()
+                && REFRESH_TOKEN != null && !REFRESH_TOKEN.trim().isEmpty();
+    }
+
     private static void ensureConfigured() {
         if (SPREADSHEET_ID == null || SPREADSHEET_ID.trim().isEmpty()) {
             throw new IllegalArgumentException("구글시트 설정이 비어 있습니다.");
         }
-        if (CLIENT_ID == null || CLIENT_ID.trim().isEmpty()
-                || CLIENT_SECRET == null || CLIENT_SECRET.trim().isEmpty()
-                || REFRESH_TOKEN == null || REFRESH_TOKEN.trim().isEmpty()) {
-            throw new IllegalArgumentException("local.properties에 shipapp 구글시트 인증값을 넣어야 합니다.");
+        if (isServiceAccountConfigured() || isOAuthConfigured()) {
+            return;
         }
+        throw new IllegalArgumentException("local.properties에 shipapp 구글시트 인증값을 넣어야 합니다.");
+    }
+
+    private static synchronized String getCachedAccessToken() throws Exception {
+        long now = System.currentTimeMillis();
+        if (!cachedAccessToken.isEmpty() && now < cachedTokenExpiry) {
+            return cachedAccessToken;
+        }
+        String token = refreshAccessToken();
+        cachedAccessToken = token;
+        cachedTokenExpiry = now + 50 * 60 * 1000L;
+        return token;
+    }
+
+    static synchronized void invalidateAccessToken() {
+        cachedAccessToken = "";
+        cachedTokenExpiry = 0L;
     }
 
     private static String refreshAccessToken() throws Exception {
+        if (isOAuthConfigured()) {
+            try {
+                return refreshOAuthToken();
+            } catch (Exception oauthError) {
+                if (isServiceAccountConfigured()) {
+                    try {
+                        return refreshServiceAccountToken();
+                    } catch (Exception serviceAccountError) {
+                        throw new IllegalArgumentException(
+                                "구글 인증 실패. OAuth 실패: " + safeMessage(oauthError)
+                                        + " / 서비스계정 재시도 실패: "
+                                        + withServiceAccountAuthHint(safeMessage(serviceAccountError)),
+                                serviceAccountError
+                        );
+                    }
+                }
+                throw oauthError;
+            }
+        }
+        if (isServiceAccountConfigured()) {
+            try {
+                return refreshServiceAccountToken();
+            } catch (Exception serviceAccountError) {
+                throw new IllegalArgumentException(
+                        withServiceAccountAuthHint(safeMessage(serviceAccountError)),
+                        serviceAccountError
+                );
+            }
+        }
+        return refreshOAuthToken();
+    }
+
+    private static String refreshServiceAccountToken() throws Exception {
+        long now = System.currentTimeMillis() / 1000;
+
+        String headerJson = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
+        String payloadJson = buildServiceAccountPayloadJson(SA_EMAIL, now);
+
+        String encodedHeader = base64UrlEncode(headerJson.getBytes(StandardCharsets.UTF_8));
+        String encodedPayload = base64UrlEncode(payloadJson.getBytes(StandardCharsets.UTF_8));
+        String signInput = encodedHeader + "." + encodedPayload;
+
+        String keyContent = SA_PRIVATE_KEY
+                .replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\\\n", "")
+                .replaceAll("\\s+", "");
+        byte[] keyBytes = Base64.decode(keyContent, Base64.DEFAULT);
+        PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(keyBytes);
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(keySpec);
+
+        Signature sig = Signature.getInstance("SHA256withRSA");
+        sig.initSign(privateKey);
+        sig.update(signInput.getBytes(StandardCharsets.UTF_8));
+        String encodedSignature = base64UrlEncode(sig.sign());
+
+        String jwt = signInput + "." + encodedSignature;
+
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
+        form.put("assertion", jwt);
+
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("Accept", "application/json");
+
+        HttpResult response = executeFormRequest(TOKEN_URL, form, headers);
+        if (!response.isSuccessful()) {
+            throw new IllegalArgumentException("구글 서비스계정 인증 실패 " + response.statusCode + ": " + clip(response.body));
+        }
+
+        JSONObject root = new JSONObject(response.body);
+        String accessToken = root.optString("access_token", "").trim();
+        if (accessToken.isEmpty()) {
+            throw new IllegalArgumentException("구글 서비스계정 access_token을 받지 못했습니다.");
+        }
+        return accessToken;
+    }
+
+    static String buildServiceAccountPayloadJson(String serviceAccountEmail, long nowSeconds) {
+        long issuedAt = Math.max(0L, nowSeconds - SERVICE_ACCOUNT_IAT_SKEW_SECONDS);
+        long expiresAt = nowSeconds + SERVICE_ACCOUNT_TOKEN_TTL_SECONDS;
+        return "{\"iss\":\"" + serviceAccountEmail + "\","
+                + "\"scope\":\"" + SHEETS_SCOPE + "\","
+                + "\"aud\":\"" + TOKEN_URL + "\","
+                + "\"iat\":" + issuedAt + ","
+                + "\"exp\":" + expiresAt + "}";
+    }
+
+    static String withServiceAccountAuthHint(String message) {
+        String safeMessage = message == null ? "" : message;
+        String normalized = safeMessage.toLowerCase(Locale.ROOT);
+        if (!normalized.contains("invalid_grant")) {
+            return safeMessage;
+        }
+        if (normalized.contains("날짜/시간") || normalized.contains("date/time")) {
+            return safeMessage;
+        }
+        return safeMessage
+                + "\nAndroid 기기 날짜/시간이 자동 설정인지 확인하세요. "
+                + "서비스계정 JWT는 기기 시간이 틀리면 구글이 invalid_grant로 거절합니다.";
+    }
+
+    private static String safeMessage(Exception ex) {
+        if (ex == null || ex.getMessage() == null || ex.getMessage().trim().isEmpty()) {
+            return "알 수 없는 오류";
+        }
+        return ex.getMessage();
+    }
+
+    private static String base64UrlEncode(byte[] data) {
+        return Base64.encodeToString(data, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+    }
+
+    private static String refreshOAuthToken() throws Exception {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("client_id", CLIENT_ID);
         form.put("client_secret", CLIENT_SECRET);

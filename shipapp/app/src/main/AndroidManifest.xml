@@ -30,6 +30,15 @@
             android:label="출고/송장 처리"
             android:parentActivityName=".MainActivity" />
 
+        <activity
+            android:name=".widget.WidgetSettingsActivity"
+            android:exported="true"
+            android:label="위젯 설정">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
         <!-- 재부팅 후 알람 복구 -->
         <receiver
             android:name=".receivers.BootReceiver"
@@ -48,13 +57,25 @@
         <receiver
             android:name=".widget.ShipmentWidget"
             android:exported="true"
-            android:label="ShipApp 위젯">
+            android:label="출고 위젯 4x2">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/shipment_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".widget.ShipmentCompactWidget"
+            android:exported="true"
+            android:label="출고 위젯 4x1">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/shipment_widget_compact_info" />
         </receiver>
 
     </application>

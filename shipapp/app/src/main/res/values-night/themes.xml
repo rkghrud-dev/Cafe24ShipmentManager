@@ -12,7 +12,7 @@
         <item name="colorSurface">@color/ship_surface</item>
         <item name="android:statusBarColor">@color/ship_surface</item>
         <item name="android:navigationBarColor">@color/ship_background</item>
-        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
-        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
     </style>
 </resources>
