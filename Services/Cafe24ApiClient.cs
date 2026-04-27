@@ -56,9 +56,61 @@ public class Cafe24ApiClient : IMarketplaceApiClient
             BaseAddress = new Uri($"https://{config.MallId}.cafe24api.com/api/v2/"),
             Timeout = TimeSpan.FromSeconds(30)
         };
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", config.AccessToken);
+        ApplyAccessTokenHeader();
         ApplyApiVersionHeader();
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    }
+
+    private void ApplyAccessTokenHeader()
+    {
+        _http.DefaultRequestHeaders.Authorization = string.IsNullOrWhiteSpace(_config.AccessToken)
+            ? null
+            : new AuthenticationHeaderValue("Bearer", _config.AccessToken);
+    }
+
+    private bool ReloadAccessTokenFromFile()
+    {
+        var path = ResolveComparablePath(_config.TokenFilePath);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return false;
+
+        try
+        {
+            var json = JObject.Parse(File.ReadAllText(path));
+            var latestAccessToken = json["AccessToken"]?.ToString();
+            if (string.IsNullOrWhiteSpace(latestAccessToken) ||
+                string.Equals(latestAccessToken, _config.AccessToken, StringComparison.Ordinal))
+                return false;
+
+            _config.AccessToken = latestAccessToken;
+            _config.TokenFilePath = path;
+
+            var latestRefreshToken = json["RefreshToken"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(latestRefreshToken))
+                _config.RefreshToken = latestRefreshToken;
+
+            var latestApiVersion = json["ApiVersion"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(latestApiVersion))
+                _config.ApiVersion = latestApiVersion;
+
+            var latestShopNo = json["ShopNo"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(latestShopNo))
+                _config.ShopNo = latestShopNo;
+
+            var latestScope = json["Scope"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(latestScope))
+                _config.Scope = latestScope;
+
+            ApplyAccessTokenHeader();
+            ApplyApiVersionHeader();
+            _log.Info($"[{ResolveMarketDisplayName()}] 최신 Cafe24 JSON Access Token 재로드: {Path.GetFileName(path)}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 JSON 재로드 실패: {ex.Message}");
+            return false;
+        }
     }
     public string SourceKey => _config.MallId;
     public string MallId => _config.MallId;
@@ -284,23 +336,33 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     {
         var reauthorizedForScope = false;
         var adjustedApiVersion = false;
+        var retriedAfterJsonReload = false;
 
         for (int i = 0; i < MaxRetries; i++)
         {
             try
             {
+                ReloadAccessTokenFromFile();
                 var resp = await action();
 
-                if (resp.StatusCode == HttpStatusCode.Unauthorized && i == 0)
+                if (resp.StatusCode == HttpStatusCode.Unauthorized)
                 {
                     var body = await resp.Content.ReadAsStringAsync();
                     if (IsInvalidAccessTokenResponse(body))
                     {
-                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 만료/무효 감지. 자동 갱신은 비활성화되어 있습니다. 외부 Cafe24Auth에서 새 JSON을 발급한 뒤 다시 실행하세요.");
+                        if (!retriedAfterJsonReload && ReloadAccessTokenFromFile())
+                        {
+                            retriedAfterJsonReload = true;
+                            resp.Dispose();
+                            _log.Info($"[{ResolveMarketDisplayName()}] 갱신된 Cafe24 JSON 적용 후 API 재시도");
+                            continue;
+                        }
+
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Access Token 만료/무효 감지. 자동 갱신은 비활성화되어 있습니다. Cafe24Auth에서 JSON을 갱신하면 다음 요청에서 다시 읽습니다.");
                     }
                     else
                     {
-                        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 인증 오류 감지. 외부 Cafe24Auth에서 JSON을 갱신한 뒤 다시 시도하세요.");
+                        _log.Warn($"[{ResolveMarketDisplayName()}] Cafe24 인증 오류 감지. Cafe24Auth에서 JSON을 갱신한 뒤 다시 시도하세요.");
                     }
 
                     return resp;
@@ -322,6 +384,7 @@ public class Cafe24ApiClient : IMarketplaceApiClient
                     if (TryAdjustApiVersion(body))
                     {
                         adjustedApiVersion = true;
+                        ReloadAccessTokenFromFile();
                         resp = await action();
                     }
                 }
