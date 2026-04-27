@@ -2155,10 +2155,10 @@ public class MainActivity extends AppCompatActivity {
 
         }
 
-        if (normalized.contains("invalid_grant")) {
+        if (normalized.contains("invalid refresh_token") || normalized.contains("invalid_grant")) {
 
             return new MarketStatusUiState("재연결 필요",
-                    "외부 인증 프로그램에서 새 JSON을 발급한 뒤 다시 가져오세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2168,7 +2168,7 @@ public class MainActivity extends AppCompatActivity {
                 || normalized.contains("invalid_token")) {
 
             return new MarketStatusUiState("인증 필요",
-                    "외부 인증 프로그램에서 새 JSON을 발급한 뒤 다시 가져오세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2222,7 +2222,7 @@ public class MainActivity extends AppCompatActivity {
         if (status.contains("인증을 다시")) {
 
             return new MarketStatusUiState("인증 필요",
-                    "외부 인증 프로그램에서 새 JSON을 발급한 뒤 다시 가져오세요.\n응답: " + simplifyCafe24ErrorReason(status),
+                    "인증을 다시 해주세요.\n기존 JSON 위치는 유지됩니다.\n응답: " + simplifyCafe24ErrorReason(status),
                     R.drawable.bg_status_chip_offline, R.color.ship_error, R.color.ship_error);
 
         }
@@ -2285,7 +2285,14 @@ public class MainActivity extends AppCompatActivity {
     private String simplifyCafe24ErrorReason(String status) {
 
         String normalized = status.toLowerCase(Locale.ROOT);
-if (normalized.contains("invalid access_token")) {
+
+        if (normalized.contains("invalid refresh_token")) {
+
+            return "Invalid refresh_token";
+
+        }
+
+        if (normalized.contains("invalid access_token")) {
 
             return "Invalid access_token";
 

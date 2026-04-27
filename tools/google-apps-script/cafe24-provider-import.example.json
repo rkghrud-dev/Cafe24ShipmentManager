@@ -1,7 +1,0 @@
-{
-  "MallId": "rkghrud1",
-  "TokenProviderUrl": "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec",
-  "TokenProviderKey": "CHANGE_ME_TO_LONG_RANDOM_TEXT",
-  "ApiVersion": "2025-12-01",
-  "ShopNo": "1"
-}
