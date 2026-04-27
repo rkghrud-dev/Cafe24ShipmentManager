@@ -6,7 +6,6 @@ import android.content.Context;
 
 import android.net.Uri;
 
-import android.util.Base64;
 
 
 
@@ -92,6 +91,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
     private static final String CAFE24_DISPATCH_STATUS_QUERY = "N20,N21,N30,C00,E00";
+    private static final String CAFE24_EXTERNAL_AUTH_REQUIRED =
+            "Cafe24 인증은 외부 인증 프로그램에서만 갱신합니다. 새 JSON을 발급한 뒤 앱에 다시 가져오세요.";
 
 
 
@@ -238,16 +239,9 @@ public class LiveShipmentRepository implements ShipmentRepository {
             JSONObject credential = new JSONObject(rawJson);
 
             String mallId = credential.optString("MallId", "").trim();
+        String accessToken = credential.optString("AccessToken", "").trim();
 
-            String accessToken = credential.optString("AccessToken", "").trim();
-
-            String clientId = credential.optString("ClientId", "").trim();
-
-            String clientSecret = credential.optString("ClientSecret", "").trim();
-
-            String refreshToken = credential.optString("RefreshToken", "").trim();
-
-            String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
+        String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
 
 
@@ -259,23 +253,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
             if (accessToken.isEmpty()) {
 
-                if (!hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
-
-                    return SourceFetchResult.failure(displayName + " Cafe24\n인증을 다시 해주세요. AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
-
-                }
-
-                String refreshedToken = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, credential, slot);
-
-                if (refreshedToken.isEmpty()) {
-
-                    return SourceFetchResult.failure(displayName + " Cafe24\n인증을 다시 해주세요. RefreshToken으로 access token을 갱신하지 못했습니다.");
-
-                }
-
-                accessToken = refreshedToken;
-
-                refreshToken = credential.optString("RefreshToken", refreshToken).trim();
+                return SourceFetchResult.failure(displayName + " Cafe24\n" + CAFE24_EXTERNAL_AUTH_REQUIRED);
 
             }
 
@@ -290,8 +268,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
             int offset = 0;
 
             final int limit = 100;
-
-            boolean tokenRetried = false;
 
             boolean versionRetried = false;
 
@@ -328,22 +304,9 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     continue;
 
                 }
+                if (response.statusCode == 401 || response.statusCode == 403) {
 
-                if ((response.statusCode == 401 || response.statusCode == 403) && !tokenRetried && !refreshToken.isEmpty() && !clientId.isEmpty() && !clientSecret.isEmpty()) {
-
-                    String refreshedToken = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, credential, slot);
-
-                    if (!refreshedToken.isEmpty()) {
-
-                        accessToken = refreshedToken;
-
-                        refreshToken = credential.optString("RefreshToken", refreshToken).trim();
-
-                        tokenRetried = true;
-
-                        continue;
-
-                    }
+                    return SourceFetchResult.failure(displayName + " Cafe24\n" + CAFE24_EXTERNAL_AUTH_REQUIRED + "\n응답: " + clip(response.body));
 
                 }
 
@@ -710,14 +673,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
             throw new Exception("MallId가 없습니다.");
 
         }
-
         String accessToken = credential.optString("AccessToken", "").trim();
-
-        String clientId = credential.optString("ClientId", "").trim();
-
-        String clientSecret = credential.optString("ClientSecret", "").trim();
-
-        String refreshToken = credential.optString("RefreshToken", "").trim();
 
         String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
@@ -726,12 +682,9 @@ public class LiveShipmentRepository implements ShipmentRepository {
             apiVersion = DEFAULT_CAFE24_API_VERSION;
 
         }
+        if (accessToken.isEmpty()) {
 
-        boolean canRefresh = !clientId.isEmpty() && !clientSecret.isEmpty() && !refreshToken.isEmpty();
-
-        if (accessToken.isEmpty() && !canRefresh) {
-
-            throw new Exception("AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
+            throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED);
 
         }
 
@@ -866,16 +819,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
             throw new Exception("MallId가 없습니다.");
 
         }
-
-
-
         String accessToken = credential.optString("AccessToken", "").trim();
-
-        String clientId = credential.optString("ClientId", "").trim();
-
-        String clientSecret = credential.optString("ClientSecret", "").trim();
-
-        String refreshToken = credential.optString("RefreshToken", "").trim();
 
         String apiVersion = credential.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
@@ -885,10 +829,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         }
 
-
-
-        boolean tokenRetried = false;
-
         boolean versionRetried = false;
 
 
@@ -897,25 +837,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
             if (accessToken.isEmpty()) {
 
-                if (!hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
-
-                    throw new Exception("AccessToken이 없고 RefreshToken 갱신 정보도 없습니다.");
-
-                }
-
-                RefreshResult refreshResult = refreshCafe24AccessTokenInMemory(mallId, clientId, clientSecret, refreshToken);
-
-                if (!refreshResult.isSuccessful()) {
-
-                    throw new Exception("RefreshToken 검증 실패: " + refreshResult.errorMessage);
-
-                }
-
-                applyCafe24RefreshResult(credential, refreshResult);
-
-                accessToken = refreshResult.accessToken;
-
-                tokenRetried = true;
+                throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED);
 
             }
 
@@ -946,38 +868,9 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 continue;
 
             }
+            if (response.statusCode == 401 || response.statusCode == 403) {
 
-
-
-            if ((response.statusCode == 401 || response.statusCode == 403)
-
-                    && !tokenRetried
-
-                    && hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
-
-                RefreshResult refreshResult = refreshCafe24AccessTokenInMemory(mallId, clientId, clientSecret, refreshToken);
-
-                if (!refreshResult.isSuccessful()) {
-
-                    throw new Exception(
-
-                            "AccessToken 검증 실패: " + clip(response.body)
-
-                                    + " / RefreshToken 갱신 실패: " + refreshResult.errorMessage
-
-                    );
-
-                }
-
-                applyCafe24RefreshResult(credential, refreshResult);
-
-                accessToken = refreshResult.accessToken;
-
-                refreshToken = credential.optString("RefreshToken", refreshToken).trim();
-
-                tokenRetried = true;
-
-                continue;
+                throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED + " 응답: " + clip(response.body));
 
             }
 
@@ -1026,154 +919,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
     }
 
 
-
-    private boolean hasCafe24RefreshCredentials(String clientId, String clientSecret, String refreshToken) {
-
-        return !clientId.isEmpty() && !clientSecret.isEmpty() && !refreshToken.isEmpty();
-
-    }
-
-
-
-    private void applyCafe24RefreshResult(JSONObject rawCredential, RefreshResult refreshResult) throws Exception {
-
-        rawCredential.put("AccessToken", refreshResult.accessToken);
-
-        if (!refreshResult.refreshToken.isEmpty()) {
-
-            rawCredential.put("RefreshToken", refreshResult.refreshToken);
-
-        }
-
-        rawCredential.put("UpdatedAt", Instant.now().toString());
-
-    }
-
-
-
-    private RefreshResult refreshCafe24AccessTokenInMemory(
-
-            String mallId,
-
-            String clientId,
-
-            String clientSecret,
-
-            String refreshToken
-
-    ) {
-
-        try {
-
-            String url = "https://" + mallId + ".cafe24api.com/api/v2/oauth/token";
-
-            Map<String, String> form = new LinkedHashMap<>();
-
-            form.put("grant_type", "refresh_token");
-
-            form.put("refresh_token", refreshToken);
-
-
-
-            Map<String, String> headers = new LinkedHashMap<>();
-
-            String basic = clientId + ":" + clientSecret;
-
-            headers.put("Authorization", "Basic " + Base64.encodeToString(basic.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
-
-            HttpResult response = executeFormRequest(url, form, headers);
-
-            if (!response.isSuccessful() && response.body.contains("Invalid client_secret")) {
-
-                form.put("client_id", clientId);
-
-                form.put("client_secret", clientSecret);
-
-                headers.remove("Authorization");
-
-                response = executeFormRequest(url, form, headers);
-
-            }
-
-
-
-            if (!response.isSuccessful()) {
-
-                return RefreshResult.failure(clip(response.body));
-
-            }
-
-
-
-            JSONObject tokenJson = new JSONObject(response.body);
-
-            String newAccessToken = tokenJson.optString("access_token", "");
-
-            if (newAccessToken.isEmpty()) {
-
-                return RefreshResult.failure("access_token이 비어 있습니다.");
-
-            }
-
-
-
-            return RefreshResult.success(
-
-                    newAccessToken,
-
-                    tokenJson.optString("refresh_token", "")
-
-            );
-
-        } catch (Exception ex) {
-
-            return RefreshResult.failure(ex.getMessage());
-
-        }
-
-    }
-
-    private String refreshCafe24AccessToken(
-
-            String mallId,
-
-            String clientId,
-
-            String clientSecret,
-
-            String refreshToken,
-
-            JSONObject rawCredential,
-
-            String slot
-
-    ) {
-
-        RefreshResult refreshResult = refreshCafe24AccessTokenInMemory(mallId, clientId, clientSecret, refreshToken);
-
-        if (!refreshResult.isSuccessful()) {
-
-            return "";
-
-        }
-
-
-
-        try {
-
-            applyCafe24RefreshResult(rawCredential, refreshResult);
-
-            credentialStore.saveCafe24Json(slot, rawCredential.toString());
-
-            return refreshResult.accessToken;
-
-        } catch (Exception ex) {
-
-            return "";
-
-        }
-
-    }
 
     private String maybeUpgradeCafe24ApiVersionInMemory(HttpResult response, JSONObject rawCredential, String currentApiVersion) {
 
@@ -1496,25 +1241,11 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         String accessToken  = cred.optString("AccessToken", "").trim();
 
-        String clientId     = cred.optString("ClientId", "").trim();
-
-        String clientSecret = cred.optString("ClientSecret", "").trim();
-
-        String refreshToken = cred.optString("RefreshToken", "").trim();
-
         String apiVersion   = cred.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
         if (mallId.isEmpty()) throw new Exception("MallId가 없습니다.");
         if (accessToken.isEmpty()) {
-            if (!hasCafe24RefreshCredentials(clientId, clientSecret, refreshToken)) {
-                throw new Exception("인증을 다시 해주세요. AccessToken 또는 RefreshToken 갱신 정보가 필요합니다.");
-            }
-            String refreshedToken = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
-            if (refreshedToken.isEmpty()) {
-                throw new Exception("인증을 다시 해주세요. RefreshToken으로 access token을 갱신하지 못했습니다.");
-            }
-            accessToken = refreshedToken;
-            refreshToken = cred.optString("RefreshToken", refreshToken).trim();
+            throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED);
         }
 
 
@@ -1524,8 +1255,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
         int offset = 0;
 
         final int limit = 100;
-
-        boolean tokenRetried = false;
 
         boolean versionRetried = false;
 
@@ -1562,13 +1291,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 continue;
 
             }
-
-            if ((resp.statusCode == 401 || resp.statusCode == 403) && !tokenRetried && !refreshToken.isEmpty() && !clientId.isEmpty() && !clientSecret.isEmpty()) {
-
-                String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
-
-                if (!refreshed.isEmpty()) { accessToken = refreshed; refreshToken = cred.optString("RefreshToken", refreshToken).trim(); tokenRetried = true; continue; }
-
+            if (resp.statusCode == 401 || resp.statusCode == 403) {
+                throw new Exception(CAFE24_EXTERNAL_AUTH_REQUIRED + " 응답: " + clip(resp.body));
             }
 
             if (!resp.isSuccessful()) throw new Exception("조회 실패 " + resp.statusCode + ": " + clip(resp.body));
@@ -1620,7 +1344,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 if (items == null) continue;
 
                 List<Cafe24ShipmentSnapshot> shipmentSnapshots = needsCafe24ShipmentFetch(order, items)
-                        ? fetchCafe24ShipmentSnapshots(mallId, orderId, accessToken, apiVersion, cred, slot, clientId, clientSecret, refreshToken)
+                        ? fetchCafe24ShipmentSnapshots(mallId, orderId, accessToken, apiVersion, cred, slot)
                         : Collections.emptyList();
 
                 for (int j = 0; j < items.length(); j++) {
@@ -1735,15 +1459,10 @@ public class LiveShipmentRepository implements ShipmentRepository {
             String accessToken,
             String apiVersion,
             JSONObject cred,
-            String slot,
-            String clientId,
-            String clientSecret,
-            String refreshToken
+            String slot
     ) {
         String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/" + orderId + "/shipments";
-        boolean tokenRetried = false;
         boolean versionRetried = false;
-        String currentRefreshToken = cred.optString("RefreshToken", refreshToken).trim();
 
         try {
             while (true) {
@@ -1758,19 +1477,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     versionRetried = true;
                     continue;
                 }
-
-                if ((response.statusCode == 401 || response.statusCode == 403)
-                        && !tokenRetried
-                        && !currentRefreshToken.isEmpty()
-                        && !clientId.isEmpty()
-                        && !clientSecret.isEmpty()) {
-                    String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, currentRefreshToken, cred, slot);
-                    if (!refreshed.isEmpty()) {
-                        accessToken = refreshed;
-                        currentRefreshToken = cred.optString("RefreshToken", currentRefreshToken).trim();
-                        tokenRetried = true;
-                        continue;
-                    }
+                if (response.statusCode == 401 || response.statusCode == 403) {
+                    return Collections.emptyList();
                 }
                 return Collections.emptyList();
             }
@@ -2096,12 +1804,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         String accessToken  = cred.optString("AccessToken", "").trim();
 
-        String clientId     = cred.optString("ClientId", "").trim();
-
-        String clientSecret = cred.optString("ClientSecret", "").trim();
-
-        String refreshToken = cred.optString("RefreshToken", "").trim();
-
         String apiVersion   = cred.optString("ApiVersion", DEFAULT_CAFE24_API_VERSION).trim();
 
 
@@ -2119,10 +1821,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     requestedStatus,
                     accessToken,
                     apiVersion,
-                    cred,
-                    clientId,
-                    clientSecret,
-                    refreshToken
+                    cred
             );
         }
 
@@ -2133,10 +1832,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 + "\"shipping_company_code\":\"" + shippingCode + "\","
 
                 + "\"status\":\"" + requestedStatus + "\"}}";
-
-
-
-        boolean tokenRetried = false;
 
         boolean versionRetried = false;
 
@@ -2161,25 +1856,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 continue;
 
             }
-
-
-
-            if ((resp.statusCode == 401 || resp.statusCode == 403) && !tokenRetried && !refreshToken.isEmpty() && !clientId.isEmpty() && !clientSecret.isEmpty()) {
-
-                String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, order.marketKey);
-
-                if (!refreshed.isEmpty()) {
-
-                    accessToken = refreshed;
-
-                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
-
-                    tokenRetried = true;
-
-                    continue;
-
-                }
-
+            if (resp.statusCode == 401 || resp.statusCode == 403) {
+                return CAFE24_EXTERNAL_AUTH_REQUIRED + " 응답: " + clip(resp.body);
             }
 
 
@@ -2187,7 +1865,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
             if ("shipping".equals(requestedStatus)) {
                 Cafe24ShipmentSnapshot existingShipment = findCafe24ShipmentSnapshot(
                         fetchCafe24ShipmentSnapshots(mallId, order.orderId, accessToken, apiVersion, cred,
-                                order.marketKey, clientId, clientSecret, refreshToken),
+                                order.marketKey),
                         order.orderItemCode
                 );
                 if (existingShipment != null && !existingShipment.shippingCode.isEmpty()) {
@@ -2205,17 +1883,14 @@ public class LiveShipmentRepository implements ShipmentRepository {
                             requestedStatus,
                             accessToken,
                             apiVersion,
-                            cred,
-                            clientId,
-                            clientSecret,
-                            refreshToken
+                            cred
                     );
                 }
             }
 
 
 
-            String resolvedMessage = resolveCafe24UploadConflict(resp, mallId, order, requestedTracking, requestedStatus, accessToken, apiVersion, cred, order.marketKey, clientId, clientSecret, refreshToken);
+            String resolvedMessage = resolveCafe24UploadConflict(resp, mallId, order, requestedTracking, requestedStatus, accessToken, apiVersion, cred, order.marketKey);
 
             if (resolvedMessage != null) {
 
@@ -2238,15 +1913,11 @@ public class LiveShipmentRepository implements ShipmentRepository {
             String requestedStatus,
             String accessToken,
             String apiVersion,
-            JSONObject cred,
-            String clientId,
-            String clientSecret,
-            String refreshToken
+            JSONObject cred
     ) throws Exception {
         String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/"
                 + order.orderId + "/shipments/" + cafe24ShippingCode;
         String body = "{\"shop_no\":1,\"request\":{\"status\":\"" + requestedStatus + "\"}}";
-        boolean tokenRetried = false;
         boolean versionRetried = false;
 
         while (true) {
@@ -2261,19 +1932,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 versionRetried = true;
                 continue;
             }
-
-            if ((response.statusCode == 401 || response.statusCode == 403)
-                    && !tokenRetried
-                    && !refreshToken.isEmpty()
-                    && !clientId.isEmpty()
-                    && !clientSecret.isEmpty()) {
-                String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, order.marketKey);
-                if (!refreshed.isEmpty()) {
-                    accessToken = refreshed;
-                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
-                    tokenRetried = true;
-                    continue;
-                }
+            if (response.statusCode == 401 || response.statusCode == 403) {
+                return CAFE24_EXTERNAL_AUTH_REQUIRED + " 응답: " + clip(response.body);
             }
 
             String resolvedMessage = resolveCafe24UploadConflict(
@@ -2285,10 +1945,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
                     accessToken,
                     apiVersion,
                     cred,
-                    order.marketKey,
-                    clientId,
-                    clientSecret,
-                    refreshToken
+                    order.marketKey
             );
             if (resolvedMessage != null) {
                 return resolvedMessage;
@@ -2307,10 +1964,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
             String accessToken,
             String apiVersion,
             JSONObject cred,
-            String slot,
-            String clientId,
-            String clientSecret,
-            String refreshToken
+            String slot
     ) throws Exception {
 
         if (response == null || response.statusCode != 422) {
@@ -2329,10 +1983,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 accessToken,
                 apiVersion,
                 cred,
-                slot,
-                clientId,
-                clientSecret,
-                refreshToken
+                slot
         );
         if (snapshot == null) {
             return "이미 배송 처리된 주문일 수 있습니다. 새로고침 후 다시 확인하세요.";
@@ -2379,14 +2030,10 @@ public class LiveShipmentRepository implements ShipmentRepository {
             String accessToken,
             String apiVersion,
             JSONObject cred,
-            String slot,
-            String clientId,
-            String clientSecret,
-            String refreshToken
+            String slot
     ) throws Exception {
 
         String url = "https://" + mallId + ".cafe24api.com/api/v2/admin/orders/" + orderId + "?embed=items";
-        boolean tokenRetried = false;
         boolean versionRetried = false;
 
         while (true) {
@@ -2426,19 +2073,8 @@ public class LiveShipmentRepository implements ShipmentRepository {
                 versionRetried = true;
                 continue;
             }
-
-            if ((response.statusCode == 401 || response.statusCode == 403)
-                    && !tokenRetried
-                    && !refreshToken.isEmpty()
-                    && !clientId.isEmpty()
-                    && !clientSecret.isEmpty()) {
-                String refreshed = refreshCafe24AccessToken(mallId, clientId, clientSecret, refreshToken, cred, slot);
-                if (!refreshed.isEmpty()) {
-                    accessToken = refreshed;
-                    refreshToken = cred.optString("RefreshToken", refreshToken).trim();
-                    tokenRetried = true;
-                    continue;
-                }
+            if (response.statusCode == 401 || response.statusCode == 403) {
+                return null;
             }
 
             return null;
@@ -3297,54 +2933,6 @@ public class LiveShipmentRepository implements ShipmentRepository {
         }
 
     }
-
-    private static class RefreshResult {
-
-        final String accessToken;
-
-        final String refreshToken;
-
-        final String errorMessage;
-
-
-
-        private RefreshResult(String accessToken, String refreshToken, String errorMessage) {
-
-            this.accessToken = accessToken == null ? "" : accessToken;
-
-            this.refreshToken = refreshToken == null ? "" : refreshToken;
-
-            this.errorMessage = errorMessage == null ? "" : errorMessage;
-
-        }
-
-
-
-        static RefreshResult success(String accessToken, String refreshToken) {
-
-            return new RefreshResult(accessToken, refreshToken, "");
-
-        }
-
-
-
-        static RefreshResult failure(String errorMessage) {
-
-            return new RefreshResult("", "", errorMessage);
-
-        }
-
-
-
-        boolean isSuccessful() {
-
-            return !accessToken.isEmpty();
-
-        }
-
-    }
-
-
 
     private static class SourceFetchResult {
 

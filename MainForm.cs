@@ -29,8 +29,7 @@ public partial class MainForm : Form
     private readonly string _defaultSheetName;
     private readonly AppUser _currentUser;
     private readonly UserSettingsService _userSettingsService;
-    private readonly Cafe24TokenRefreshService _tokenRefreshService;
-    private bool _tokenWarningShown;
+    private readonly Cafe24TokenStatusService _tokenStatusService;
     private const string StockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
     private const int StockDefaultSheetGid = 2073400281;
     private const string PendingShipmentSheetName = "미출고 정보";
@@ -73,9 +72,9 @@ public partial class MainForm : Form
     private Button btnStockLoad = null!;
     private DataGridView dgvStock = null!;
     private DataGridView dgvTokens = null!;
-    private Button btnTokenRefresh = null!;
+
     private Button btnTokenReload = null!;
-    private Button btnTokenReauth = null!;
+
 
     // ── 출고 탭 내부 서브탭 ──
     private TabControl tabShipSub = null!;
@@ -113,7 +112,7 @@ public partial class MainForm : Form
         _defaultSheetName = defaultSheetName;
         _currentUser = currentUser;
         _userSettingsService = userSettingsService;
-        _tokenRefreshService = new Cafe24TokenRefreshService(log);
+        _tokenStatusService = new Cafe24TokenStatusService();
 
         InitializeUI();
         WireEvents();
@@ -817,18 +816,14 @@ public partial class MainForm : Form
         var top = new Panel { Dock = DockStyle.Top, Height = 46 };
         var lbl = new Label
         {
-            Text = "Cafe24 Refresh Token 수동 관리. 만료 5일 이내면 시작 시 경고를 표시합니다.",
+            Text = "Cafe24 Access Token 상태 확인 전용입니다. 갱신/재인증은 외부 Cafe24Auth에서만 진행하세요.",
             Location = new Point(8, 13),
             AutoSize = true,
             ForeColor = Color.DimGray
         };
-        btnTokenRefresh = new Button { Text = "🔄 선택 마켓 갱신", Location = new Point(500, 8), Width = 140, Height = 30 };
-        btnTokenReauth = new Button { Text = "🔐 재인증 도구", Location = new Point(650, 8), Width = 120, Height = 30 };
         btnTokenReload = new Button { Text = "↻ 새로고침", Location = new Point(780, 8), Width = 100, Height = 30 };
-        btnTokenRefresh.Click += async (_, _) => await RefreshSelectedTokenAsync();
-        btnTokenReauth.Click += (_, _) => OpenReauthToolForSelectedMarket();
         btnTokenReload.Click += (_, _) => LoadTokenStatuses(showWarning: false);
-        top.Controls.AddRange(new Control[] { lbl, btnTokenRefresh, btnTokenReauth, btnTokenReload });
+        top.Controls.AddRange(new Control[] { lbl, btnTokenReload });
 
         dgvTokens = CreateGridView();
         dgvTokens.ReadOnly = true;
@@ -838,22 +833,19 @@ public partial class MainForm : Form
         dgvTokens.Columns.Add("Market", "마켓명");
         dgvTokens.Columns.Add("MallId", "Mall ID");
         dgvTokens.Columns.Add("AccessExpiry", "Access 만료");
-        dgvTokens.Columns.Add("RefreshExpiry", "Refresh 만료");
-        dgvTokens.Columns.Add("Remain", "남은 기간");
+        dgvTokens.Columns.Add("Remain", "Access 남은 시간");
         dgvTokens.Columns.Add("Status", "상태");
         dgvTokens.Columns.Add("Path", "JSON 파일");
         dgvTokens.Columns["Market"]!.Width = 140;
         dgvTokens.Columns["MallId"]!.Width = 130;
         dgvTokens.Columns["AccessExpiry"]!.Width = 150;
-        dgvTokens.Columns["RefreshExpiry"]!.Width = 150;
-        dgvTokens.Columns["Remain"]!.Width = 100;
-        dgvTokens.Columns["Status"]!.Width = 180;
+        dgvTokens.Columns["Remain"]!.Width = 120;
+        dgvTokens.Columns["Status"]!.Width = 220;
         dgvTokens.Columns["Path"]!.Width = 420;
 
         tabToken.Controls.Add(dgvTokens);
         tabToken.Controls.Add(top);
     }
-
     private async Task InitStockTabAsync()
     {
         if (_sheetsReader == null || cboStockSheet == null) return;
@@ -1823,68 +1815,12 @@ public partial class MainForm : Form
                    string.Equals(order.OrderId, matchResult.Cafe24OrderId, StringComparison.OrdinalIgnoreCase));
     }
 
-    private void OpenReauthToolForSelectedMarket()
-    {
-        var status = FindSelectedTokenStatus();
-        if (status == null)
-        {
-            MessageBox.Show("재인증할 마켓을 선택하세요.", "토큰 관리", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        var authToolPath = ResolveCafe24AuthPath();
-        if (string.IsNullOrWhiteSpace(authToolPath))
-        {
-            MessageBox.Show(
-                "Cafe24Auth 실행 파일을 찾을 수 없습니다.\n\n" +
-                "설치형 버전에서는 메인 프로그램 옆의 Cafe24Auth 폴더에 함께 설치됩니다.\n" +
-                "개발 중이라면 바탕화면 Cafe24Auth 프로젝트 빌드 경로도 함께 확인하세요.",
-                "재인증 도구 없음", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-        {
-            FileName = authToolPath,
-            WorkingDirectory = Path.GetDirectoryName(authToolPath) ?? AppContext.BaseDirectory,
-            UseShellExecute = true
-        });
-
-        MessageBox.Show($"Cafe24Auth를 열었습니다.\n\n마켓: {status.DisplayName} ({status.MallId})\n선택 후 '🔐 재인증'을 진행하세요.",
-            "재인증 도구 실행", MessageBoxButtons.OK, MessageBoxIcon.Information);
-    }
-
-    private static string? ResolveCafe24AuthPath()
-    {
-        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var envPath = Environment.GetEnvironmentVariable("CAFE24_AUTH_PATH");
-        var candidates = new[]
-        {
-            envPath,
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Cafe24Auth", "Cafe24Auth.exe")),
-            Path.Combine(AppContext.BaseDirectory, "Cafe24Auth", "Cafe24Auth.exe"),
-            Path.Combine(localAppData, "Programs", "Cafe24ShipmentManager", "Cafe24Auth", "Cafe24Auth.exe"),
-            Path.Combine(desktop, "Cafe24Auth", "publish5", "Cafe24Auth.exe"),
-            Path.Combine(desktop, "Cafe24Auth", "bin", "Release", "net6.0-windows", "Cafe24Auth.exe"),
-            Path.Combine(desktop, "Cafe24Auth", "bin", "Debug", "net6.0-windows", "Cafe24Auth.exe")
-        };
-
-        foreach (var candidate in candidates)
-        {
-            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-                return candidate;
-        }
-
-        return null;
-    }
-
     private void LoadTokenStatuses(bool showWarning)
     {
         if (dgvTokens == null)
             return;
 
-        var statuses = _tokenRefreshService
+        var statuses = _tokenStatusService
             .LoadStatuses(_marketClients.OfType<Cafe24ApiClient>().OrderBy(client => client.DisplayName, StringComparer.OrdinalIgnoreCase))
             .ToList();
 
@@ -1895,99 +1831,20 @@ public partial class MainForm : Form
                 status.DisplayName,
                 status.MallId,
                 FormatDateTime(status.AccessExpiresAt),
-                FormatDateTime(status.RefreshExpiresAt),
-                FormatRemaining(status.RefreshRemaining),
+                FormatRemaining(status.AccessRemaining),
                 status.StatusMessage,
                 status.TokenFilePath);
 
             var row = dgvTokens.Rows[idx];
             row.Tag = status;
-            if (!status.HasRefreshToken || status.RefreshRemaining.TotalDays <= 0)
+            if (!status.HasAccessToken || status.AccessRemaining.TotalSeconds <= 0)
                 row.DefaultCellStyle.BackColor = UiPalette.DangerSurface;
-            else if (status.NeedsRefreshWarning)
+            else if (status.NeedsAccessWarning)
                 row.DefaultCellStyle.BackColor = UiPalette.WarningSurface;
             else
                 row.DefaultCellStyle.BackColor = UiPalette.SuccessSurface;
         }
-
-        if (showWarning)
-            ShowRefreshWarning(statuses);
     }
-
-    private async Task RefreshSelectedTokenAsync()
-    {
-        var status = FindSelectedTokenStatus();
-        if (status == null)
-        {
-            MessageBox.Show("갱신할 마켓을 선택하세요.", "토큰 관리", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        try
-        {
-            btnTokenRefresh.Enabled = false;
-            var result = await _tokenRefreshService.RefreshAsync(status);
-            if (!result.success)
-            {
-                MessageBox.Show(result.message, "토큰 갱신 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            LoadTokenStatuses(showWarning: false);
-            SelectTokenRow(status.TokenFilePath);
-            MessageBox.Show("토큰 갱신이 완료되었습니다. Refresh 기준일도 현재 시각으로 갱신했습니다.",
-                "토큰 갱신 완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        finally
-        {
-            btnTokenRefresh.Enabled = true;
-        }
-    }
-
-    private Cafe24TokenStatus? FindSelectedTokenStatus()
-    {
-        return dgvTokens?.CurrentRow?.Tag as Cafe24TokenStatus;
-    }
-
-    private void SelectTokenRow(string tokenFilePath)
-    {
-        if (dgvTokens == null)
-            return;
-
-        foreach (DataGridViewRow row in dgvTokens.Rows)
-        {
-            if (row.Tag is Cafe24TokenStatus status &&
-                string.Equals(status.TokenFilePath, tokenFilePath, StringComparison.OrdinalIgnoreCase))
-            {
-                row.Selected = true;
-                dgvTokens.CurrentCell = row.Cells[0];
-                return;
-            }
-        }
-    }
-
-    private void ShowRefreshWarning(IReadOnlyList<Cafe24TokenStatus> statuses)
-    {
-        if (_tokenWarningShown)
-            return;
-
-        var warningTargets = statuses
-            .Where(status => status.HasRefreshToken && status.NeedsRefreshWarning)
-            .OrderBy(status => status.RefreshRemaining)
-            .ToList();
-        if (warningTargets.Count == 0)
-            return;
-
-        _tokenWarningShown = true;
-        var lines = warningTargets
-            .Select(status => $"- {status.DisplayName} ({status.MallId}) : {FormatRemaining(status.RefreshRemaining)}")
-            .ToArray();
-        var message = "다음 마켓의 Refresh Token 만료가 5일 이내입니다.\n\n" +
-                      string.Join("\n", lines) +
-                      "\n\n'토큰 관리' 탭에서 수동 갱신하세요.";
-        MessageBox.Show(message, "Refresh Token 경고", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-
     private static string FormatDateTime(DateTime value)
     {
         return value == DateTime.MinValue ? "-" : value.ToString("yyyy-MM-dd HH:mm");
