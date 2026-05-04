@@ -44,7 +44,7 @@ public class GoogleSheetsReader
     /// <summary>
     /// OAuth2 인증으로 GoogleSheetsReader 생성 (브라우저 로그인)
     /// </summary>
-    public static async Task<GoogleSheetsReader> CreateAsync(string credentialJsonPath, AppLogger logger)
+    public static async Task<GoogleSheetsReader> CreateAsync(string credentialJsonPath, AppLogger logger, bool forceConsent = false)
     {
         var tokenPath = Path.Combine(
             Path.GetDirectoryName(credentialJsonPath) ?? ".", "token");
@@ -52,7 +52,13 @@ public class GoogleSheetsReader
         UserCredential credential;
         try
         {
-            credential = await AuthorizeAsync(credentialJsonPath, tokenPath, forceConsent: false);
+            if (forceConsent)
+            {
+                logger.Info("Google 재인증을 위해 저장된 토큰 캐시를 초기화합니다.");
+                ResetTokenCache(tokenPath, logger);
+            }
+
+            credential = await AuthorizeAsync(credentialJsonPath, tokenPath, forceConsent);
             await credential.GetAccessTokenForRequestAsync();
         }
         catch (TokenResponseException ex) when (IsInvalidGrant(ex))
@@ -92,7 +98,7 @@ public class GoogleSheetsReader
         var initializer = new GoogleAuthorizationCodeFlow.Initializer
         {
             ClientSecrets = secrets,
-            Prompt = "consent"
+            Prompt = "consent select_account"
         };
 
         return await GoogleWebAuthorizationBroker.AuthorizeAsync(

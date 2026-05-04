@@ -47,6 +47,7 @@ public partial class MainForm : Form
     // ── Top Bar (공통) ──
     private ComboBox cboSheet = null!;
     private Label lblStatus = null!;
+    private Button btnGoogleReconnect = null!;
     private Button btnUserSettings = null!;
     private Button btnLogout = null!;
 
@@ -487,15 +488,71 @@ public partial class MainForm : Form
     // ═══════════════════════════════════════
     private async Task InitAsync()
     {
+        await ConnectGoogleSheetsAsync(forceConsent: false, showErrorDialog: false);
+    }
+
+    private async Task ReconnectGoogleAsync()
+    {
+        await ConnectGoogleSheetsAsync(forceConsent: true, showErrorDialog: true);
+    }
+
+    private async Task<bool> PromptReconnectGoogleAsync()
+    {
+        var result = MessageBox.Show(
+            "시트 연결이 안 되어 있습니다.\n\nGoogle 계정을 다시 확인하고 연결할까요?",
+            "Google 재인증",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result != DialogResult.Yes)
+            return false;
+
+        await ReconnectGoogleAsync();
+        return _sheetsReader != null;
+    }
+
+    private async Task ConnectGoogleSheetsAsync(bool forceConsent, bool showErrorDialog)
+    {
+        if (string.IsNullOrWhiteSpace(_credentialPath) || !File.Exists(_credentialPath))
+        {
+            MarkGoogleDisconnected("❌ Google 인증 파일 없음");
+            if (showErrorDialog)
+            {
+                MessageBox.Show(
+                    $"Google 인증 파일을 찾지 못했습니다.\n\n설정된 경로:\n{_credentialPath}",
+                    "Google 연결 실패",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_spreadsheetId))
+        {
+            MarkGoogleDisconnected("❌ 스프레드시트 ID 없음");
+            if (showErrorDialog)
+            {
+                MessageBox.Show(
+                    "Google 스프레드시트 ID가 비어 있습니다.\n마켓 추가/설정에서 스프레드시트 ID를 확인하세요.",
+                    "Google 연결 실패",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            return;
+        }
+
         try
         {
-            lblStatus.Text = "Google 인증 중...";
+            btnGoogleReconnect.Enabled = false;
+            cboSheet.Enabled = false;
+            lblStatus.Text = forceConsent ? "Google 재인증 중..." : "Google 인증 중...";
             lblStatus.ForeColor = Color.Blue;
 
-            _sheetsReader = await GoogleSheetsReader.CreateAsync(_credentialPath, _log);
+            var reader = await GoogleSheetsReader.CreateAsync(_credentialPath, _log, forceConsent);
 
             // 시트 목록
-            var sheets = _sheetsReader.GetSheetList(_spreadsheetId);
+            var sheets = await Task.Run(() => reader.GetSheetList(_spreadsheetId));
+            _sheetsReader = reader;
             cboSheet.Items.Clear();
             foreach (var (title, _) in sheets)
                 cboSheet.Items.Add(title);
@@ -508,7 +565,7 @@ public partial class MainForm : Form
                 defaultIdx = sheets.FindIndex(s => s.title.Contains(PreferredShipmentSheetName, StringComparison.OrdinalIgnoreCase));
             if (defaultIdx < 0)
                 defaultIdx = sheets.FindIndex(s => s.title.Contains("출고", StringComparison.OrdinalIgnoreCase));
-            cboSheet.SelectedIndex = defaultIdx >= 0 ? defaultIdx : 0;
+            cboSheet.SelectedIndex = cboSheet.Items.Count > 0 ? (defaultIdx >= 0 ? defaultIdx : 0) : -1;
 
             lblStatus.Text = $"✅ 연결 완료 ({sheets.Count}개 시트)";
             lblStatus.ForeColor = Color.DarkGreen;
@@ -517,14 +574,44 @@ public partial class MainForm : Form
             await LoadVendorsAsync();
 
             // 재고관리 확장 초기화
-            await InitEnhancedStockAsync();
+            try
+            {
+                await InitEnhancedStockAsync();
+            }
+            catch (Exception ex)
+            {
+                _log.Error("재고관리 시트 초기화 실패", ex);
+            }
         }
         catch (Exception ex)
         {
-            _log.Error("초기화 실패", ex);
-            lblStatus.Text = "❌ 연결 실패";
-            lblStatus.ForeColor = Color.Red;
+            _log.Error(forceConsent ? "Google 재인증 실패" : "초기화 실패", ex);
+            MarkGoogleDisconnected("❌ 연결 실패 - 구글 재인증 필요");
+            if (showErrorDialog)
+            {
+                MessageBox.Show(
+                    $"Google 시트 연결에 실패했습니다.\n\n{ex.Message}\n\n상단의 [구글 재인증] 버튼으로 다시 시도하세요.",
+                    "Google 연결 실패",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
+        finally
+        {
+            btnGoogleReconnect.Enabled = true;
+            cboSheet.Enabled = _sheetsReader != null && cboSheet.Items.Count > 0;
+        }
+    }
+
+    private void MarkGoogleDisconnected(string message)
+    {
+        _sheetsReader = null;
+        cboSheet.Items.Clear();
+        clbVendors.Items.Clear();
+        lblStatus.Text = message;
+        lblStatus.ForeColor = Color.Red;
+        btnGoogleReconnect.Enabled = true;
+        cboSheet.Enabled = false;
     }
 
     private async Task LoadVendorsAsync()
@@ -574,7 +661,7 @@ public partial class MainForm : Form
         var topButtonPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Right,
-            Width = 220,
+            Width = 340,
             Height = 36,
             Padding = new Padding(0, 4, 8, 0),
             FlowDirection = FlowDirection.RightToLeft,
@@ -592,8 +679,15 @@ public partial class MainForm : Form
             Width = 100,
             Height = 28
         };
+        btnGoogleReconnect = new Button
+        {
+            Text = "구글 재인증",
+            Width = 110,
+            Height = 28
+        };
         topButtonPanel.Controls.Add(btnLogout);
         topButtonPanel.Controls.Add(btnUserSettings);
+        topButtonPanel.Controls.Add(btnGoogleReconnect);
         topBar.Controls.Add(topButtonPanel);
         topBar.Controls.AddRange(new Control[] { lblSheet, cboSheet, lblStatus });
 
@@ -1062,6 +1156,7 @@ public partial class MainForm : Form
         btnPush.Click += async (_, _) => await ExecutePushAsync();
         btnExportFailed.Click += (_, _) => ExportFailed();
         btnUserSettings.Click += (_, _) => OpenUserSettings();
+        btnGoogleReconnect.Click += async (_, _) => await ReconnectGoogleAsync();
         btnLogout.Click += (_, _) => LogoutCurrentUser();
         if (btnStockLoad != null) btnStockLoad.Click += async (_, _) => await LoadStockSheetPreviewAsync();
     }
@@ -1255,7 +1350,9 @@ public partial class MainForm : Form
     private async Task ExecuteMatchingAsync()
     {
         if (_cafe24Orders.Count == 0) { MessageBox.Show("먼저 주문을 조회하세요.", "알림"); return; }
-        if (_sheetsReader == null) { MessageBox.Show("시트 연결이 안 되어 있습니다.", "알림"); return; }
+        if (_sheetsReader == null && !await PromptReconnectGoogleAsync()) return;
+        var sheetsReader = _sheetsReader;
+        if (sheetsReader == null) return;
 
         var sheetName = cboSheet.SelectedItem?.ToString();
         if (string.IsNullOrEmpty(sheetName)) { MessageBox.Show("시트를 선택하세요.", "알림"); return; }
@@ -1276,8 +1373,8 @@ public partial class MainForm : Form
 
             _excelResult = await Task.Run(() =>
                 selectedVendors.Count > 0
-                    ? _sheetsReader.ReadSheetFiltered(_spreadsheetId, sheetName, selectedVendors, startDate, endDate)
-                    : _sheetsReader.ReadSheet(_spreadsheetId, sheetName));
+                    ? sheetsReader.ReadSheetFiltered(_spreadsheetId, sheetName, selectedVendors, startDate, endDate)
+                    : sheetsReader.ReadSheet(_spreadsheetId, sheetName));
 
             _filteredRows = _excelResult.Rows;
             _log.Info($"스프레드시트 '{sheetName}' 로드: {_filteredRows.Count}행" +
