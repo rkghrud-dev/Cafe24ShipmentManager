@@ -40,6 +40,11 @@ public sealed class UserSettingsService
         return ParseCafe24MarketEntries(LoadDraft(userId).Cafe24Json);
     }
 
+    public IReadOnlyList<CoupangMarketEntry> LoadCoupangMarkets(long userId)
+    {
+        return ParseCoupangMarketEntries(LoadDraft(userId).CoupangJson);
+    }
+
     public void SaveCafe24Markets(long userId, IEnumerable<Cafe24MarketEntry> markets, bool requireMarketplaceConfig)
     {
         var existingDraft = LoadDraft(userId);
@@ -52,6 +57,28 @@ public sealed class UserSettingsService
             GoogleDefaultSheetName = existingDraft.GoogleDefaultSheetName,
             Cafe24Json = BuildCafe24MarketJson(existingDraft.Cafe24Json, normalizedMarkets),
             CoupangJson = existingDraft.CoupangJson
+        };
+
+        SaveUserSettings(userId, draft, requireMarketplaceConfig);
+    }
+
+    public void SaveMarketplaceMarkets(
+        long userId,
+        IEnumerable<Cafe24MarketEntry> cafe24Markets,
+        IEnumerable<CoupangMarketEntry> coupangMarkets,
+        bool requireMarketplaceConfig)
+    {
+        var existingDraft = LoadDraft(userId);
+        var normalizedMarkets = NormalizeCafe24MarketEntries(cafe24Markets).ToList();
+        var normalizedCoupangMarkets = NormalizeCoupangMarketEntries(coupangMarkets).ToList();
+
+        var draft = new UserSettingsDraft
+        {
+            GoogleCredentialPath = existingDraft.GoogleCredentialPath,
+            GoogleSpreadsheetId = existingDraft.GoogleSpreadsheetId,
+            GoogleDefaultSheetName = existingDraft.GoogleDefaultSheetName,
+            Cafe24Json = BuildCafe24MarketJson(existingDraft.Cafe24Json, normalizedMarkets),
+            CoupangJson = BuildCoupangMarketJson(existingDraft.CoupangJson, normalizedCoupangMarkets)
         };
 
         SaveUserSettings(userId, draft, requireMarketplaceConfig);
@@ -176,6 +203,52 @@ public sealed class UserSettingsService
         });
     }
 
+    private static IReadOnlyList<CoupangMarketEntry> ParseCoupangMarketEntries(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return Array.Empty<CoupangMarketEntry>();
+
+        JObject coupang;
+        try
+        {
+            coupang = JObject.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<CoupangMarketEntry>();
+        }
+
+        var result = new List<CoupangMarketEntry>();
+        var markets = coupang["Markets"] as JArray;
+        if (markets != null && markets.Count > 0)
+        {
+            foreach (var marketSection in markets.OfType<JObject>())
+                AddCoupangMarketEntry(result, marketSection);
+
+            return result;
+        }
+
+        if (coupang.Properties().Any())
+            AddCoupangMarketEntry(result, coupang);
+
+        return result;
+    }
+
+    private static void AddCoupangMarketEntry(ICollection<CoupangMarketEntry> target, JObject marketSection)
+    {
+        var displayName = ReadString(marketSection, "DisplayName", ReadString(marketSection, "VendorId", ""));
+        var keyFilePath = ReadString(marketSection, "KeyFilePath", ReadString(marketSection, "CredentialFilePath", ""));
+
+        if (string.IsNullOrWhiteSpace(displayName) && string.IsNullOrWhiteSpace(keyFilePath))
+            return;
+
+        target.Add(new CoupangMarketEntry
+        {
+            DisplayName = displayName,
+            KeyFilePath = keyFilePath
+        });
+    }
+
     private static IReadOnlyList<Cafe24MarketEntry> NormalizeCafe24MarketEntries(IEnumerable<Cafe24MarketEntry> markets)
     {
         var normalized = new List<Cafe24MarketEntry>();
@@ -216,6 +289,46 @@ public sealed class UserSettingsService
         return normalized;
     }
 
+    private static IReadOnlyList<CoupangMarketEntry> NormalizeCoupangMarketEntries(IEnumerable<CoupangMarketEntry> markets)
+    {
+        var normalized = new List<CoupangMarketEntry>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var market in markets ?? Enumerable.Empty<CoupangMarketEntry>())
+        {
+            var displayName = market.DisplayName?.Trim() ?? "";
+            var keyFilePath = market.KeyFilePath?.Trim() ?? "";
+
+            if (string.IsNullOrWhiteSpace(displayName) && string.IsNullOrWhiteSpace(keyFilePath))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(displayName))
+                throw new InvalidOperationException("쿠팡 마켓명을 입력하세요.");
+
+            if (string.IsNullOrWhiteSpace(keyFilePath))
+                throw new InvalidOperationException($"'{displayName}'의 쿠팡 Wing API 키 파일을 선택하세요.");
+
+            var resolvedPath = ResolveComparablePath(keyFilePath);
+            if (!File.Exists(resolvedPath))
+                throw new InvalidOperationException($"'{displayName}'의 쿠팡 Wing API 키 파일을 찾을 수 없습니다: {resolvedPath}");
+
+            if (!seenNames.Add(displayName))
+                throw new InvalidOperationException($"중복된 쿠팡 마켓명입니다: {displayName}");
+
+            if (!seenPaths.Add(resolvedPath))
+                throw new InvalidOperationException($"같은 쿠팡 Wing API 키 파일이 중복되었습니다: {resolvedPath}");
+
+            normalized.Add(new CoupangMarketEntry
+            {
+                DisplayName = displayName,
+                KeyFilePath = keyFilePath
+            });
+        }
+
+        return normalized;
+    }
+
     private static string BuildCafe24MarketJson(string existingJson, IReadOnlyCollection<Cafe24MarketEntry> markets)
     {
         if (markets.Count == 0)
@@ -244,6 +357,46 @@ public sealed class UserSettingsService
         }));
 
         return cafe24.ToString(Formatting.Indented);
+    }
+
+    private static string BuildCoupangMarketJson(string existingJson, IReadOnlyCollection<CoupangMarketEntry> markets)
+    {
+        if (markets.Count == 0)
+            return "";
+
+        var coupang = new JObject();
+        if (!string.IsNullOrWhiteSpace(existingJson))
+        {
+            try
+            {
+                var existing = JObject.Parse(existingJson);
+                CopyIfPresent(existing, coupang, "ApiBaseUrl");
+                CopyIfPresent(existing, coupang, "DefaultShippingCompanyCode");
+                CopyIfPresent(existing, coupang, "OrderFetchDays");
+                CopyIfPresent(existing, coupang, "FetchStatuses");
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        if (coupang["ApiBaseUrl"] == null)
+            coupang["ApiBaseUrl"] = "https://api-gateway.coupang.com";
+        if (coupang["DefaultShippingCompanyCode"] == null)
+            coupang["DefaultShippingCompanyCode"] = "CJGLS";
+        if (coupang["OrderFetchDays"] == null)
+            coupang["OrderFetchDays"] = 14;
+        if (coupang["FetchStatuses"] == null)
+            coupang["FetchStatuses"] = new JArray("ACCEPT", "INSTRUCT");
+
+        coupang["Markets"] = new JArray(markets.Select(market => new JObject
+        {
+            ["Enabled"] = true,
+            ["DisplayName"] = market.DisplayName,
+            ["KeyFilePath"] = market.KeyFilePath
+        }));
+
+        return coupang.ToString(Formatting.Indented);
     }
 
     private static void CopyIfPresent(JObject source, JObject target, string propertyName)

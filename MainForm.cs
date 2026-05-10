@@ -143,7 +143,7 @@ public partial class MainForm : Form
 
     private string ResolveMarketDisplayName(IMarketplaceApiClient client)
     {
-        return client.DisplayName;
+        return FormatMarketDisplayName(client.DisplayName, client.SourceKey);
     }
 
     private static string ResolveSourceTypeLabel(string? sourceKey)
@@ -158,7 +158,10 @@ public partial class MainForm : Form
 
     private string ResolveSourceFilterLabel(IMarketplaceApiClient client)
     {
-        return $"{client.DisplayName} / {ResolveSourceTypeLabel(client.SourceKey)}";
+        var marketName = ResolveMarketDisplayName(client);
+        return MarketplaceSourceKey.IsCoupang(client.SourceKey)
+            ? marketName
+            : $"{marketName} / {ResolveSourceTypeLabel(client.SourceKey)}";
     }
 
     private IReadOnlyList<IMarketplaceApiClient> GetSelectedMarketClients()
@@ -178,12 +181,27 @@ public partial class MainForm : Form
 
     private static string ResolveMarketDisplayName(Cafe24Order order)
     {
-        return string.IsNullOrWhiteSpace(order.MarketName) ? order.MallId : order.MarketName;
+        return FormatMarketDisplayName(
+            string.IsNullOrWhiteSpace(order.MarketName) ? order.MallId : order.MarketName,
+            order.MallId);
     }
 
     private static string ResolveMarketDisplayName(MatchResult matchResult)
     {
-        return string.IsNullOrWhiteSpace(matchResult.Cafe24MarketName) ? matchResult.Cafe24MallId : matchResult.Cafe24MarketName;
+        return FormatMarketDisplayName(
+            string.IsNullOrWhiteSpace(matchResult.Cafe24MarketName) ? matchResult.Cafe24MallId : matchResult.Cafe24MarketName,
+            matchResult.Cafe24MallId);
+    }
+
+    private static string FormatMarketDisplayName(string? displayName, string? sourceKey)
+    {
+        var name = string.IsNullOrWhiteSpace(displayName) ? sourceKey?.Trim() ?? "" : displayName.Trim();
+        if (!MarketplaceSourceKey.IsCoupang(sourceKey))
+            return name;
+
+        return name.Contains("쿠팡", StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{name}(쿠팡)";
     }
 
     private IMarketplaceApiClient? FindApiClient(string sourceKey)
@@ -303,6 +321,9 @@ public partial class MainForm : Form
     {
         var marketName = ResolveMarketDisplayName(order);
         var sourceType = ResolveSourceTypeLabel(order);
+        if (MarketplaceSourceKey.IsCoupang(order.MallId))
+            return marketName;
+
         return string.IsNullOrWhiteSpace(marketName) ? sourceType : $"{marketName} / {sourceType}";
     }
 
@@ -1905,8 +1926,10 @@ public partial class MainForm : Form
     {
         if (api is Cafe24ApiClient cafe24Api)
             return cafe24Api.PushDeliveryWaiting(order, trackingNumber, shippingCompanyCode);
+        if (api is CoupangApiClient coupangApi)
+            return coupangApi.PushDeliveryWaiting(order, trackingNumber, shippingCompanyCode);
 
-        return Task.FromResult((false, "배송대기 API는 Cafe24 수집원만 지원합니다.", 0));
+        return Task.FromResult((false, "배송대기 API를 지원하지 않는 수집원입니다.", 0));
     }
 
     private Cafe24Order? FindOrderForMatch(MatchResult matchResult)

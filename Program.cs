@@ -100,7 +100,7 @@ static class Program
             .Select(group => new Cafe24ApiClient(group.First(), logger)));
 
         var coupangSection = config["Coupang"] as JObject;
-        clients.AddRange(BuildCoupangConfigs(coupangSection)
+        clients.AddRange(BuildCoupangConfigs(coupangSection, logger)
             .Where(c => c.Enabled)
             .Where(c => !string.IsNullOrWhiteSpace(c.VendorId))
             .Where(c => !string.IsNullOrWhiteSpace(c.AccessKey))
@@ -151,36 +151,99 @@ static class Program
         };
     }
 
-    private static List<CoupangConfig> BuildCoupangConfigs(JObject? coupangSection)
+    private static List<CoupangConfig> BuildCoupangConfigs(JObject? coupangSection, AppLogger logger)
     {
         var markets = coupangSection?["Markets"] as JArray;
         if (markets != null && markets.Count > 0)
         {
             return markets
                 .OfType<JObject>()
-                .Select(marketSection => CreateCoupangConfig(coupangSection, marketSection))
+                .Select(marketSection => CreateCoupangConfig(coupangSection, marketSection, logger))
                 .ToList();
         }
 
         return coupangSection == null
             ? new List<CoupangConfig>()
-            : new List<CoupangConfig> { CreateCoupangConfig(coupangSection, null) };
+            : new List<CoupangConfig> { CreateCoupangConfig(coupangSection, null, logger) };
     }
 
-    private static CoupangConfig CreateCoupangConfig(JObject? coupangSection, JObject? marketSection)
+    private static CoupangConfig CreateCoupangConfig(JObject? coupangSection, JObject? marketSection, AppLogger logger)
     {
+        var keyFilePath = ResolvePath(ReadString(marketSection, "KeyFilePath",
+            ReadString(marketSection, "CredentialFilePath",
+                ReadString(coupangSection, "KeyFilePath",
+                    ReadString(coupangSection, "CredentialFilePath", "")))));
+        var keyFileValues = LoadCoupangKeyFile(keyFilePath, logger);
+
         return new CoupangConfig
         {
             Enabled = ReadBool(marketSection, "Enabled", ReadBool(coupangSection, "Enabled", true)),
             DisplayName = ReadString(marketSection, "DisplayName", ReadString(coupangSection, "DisplayName", "홈런마켓")),
-            VendorId = ReadString(marketSection, "VendorId", ReadString(coupangSection, "VendorId", "")),
-            AccessKey = ReadString(marketSection, "AccessKey", ReadString(coupangSection, "AccessKey", "")),
-            SecretKey = ReadString(marketSection, "SecretKey", ReadString(coupangSection, "SecretKey", "")),
+            KeyFilePath = keyFilePath,
+            VendorId = ReadKeyFileValue(keyFileValues, "vendor_id", ReadString(marketSection, "VendorId", ReadString(coupangSection, "VendorId", ""))),
+            AccessKey = ReadKeyFileValue(keyFileValues, "access_key", ReadString(marketSection, "AccessKey", ReadString(coupangSection, "AccessKey", ""))),
+            SecretKey = ReadKeyFileValue(keyFileValues, "secret_key", ReadString(marketSection, "SecretKey", ReadString(coupangSection, "SecretKey", ""))),
             ApiBaseUrl = ReadString(marketSection, "ApiBaseUrl", ReadString(coupangSection, "ApiBaseUrl", "https://api-gateway.coupang.com")),
             DefaultShippingCompanyCode = ReadString(marketSection, "DefaultShippingCompanyCode", ReadString(coupangSection, "DefaultShippingCompanyCode", "CJGLS")),
             OrderFetchDays = ReadInt(marketSection, "OrderFetchDays", ReadInt(coupangSection, "OrderFetchDays", 14)),
             FetchStatuses = ReadStringList(marketSection, "FetchStatuses", ReadStringList(coupangSection, "FetchStatuses", new List<string> { "ACCEPT", "INSTRUCT" }))
         };
+    }
+
+    private static Dictionary<string, string> LoadCoupangKeyFile(string keyFilePath, AppLogger logger)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(keyFilePath))
+            return values;
+
+        if (!File.Exists(keyFilePath))
+        {
+            logger.Warn($"쿠팡 Wing API 키 파일을 찾을 수 없습니다: {keyFilePath}");
+            return values;
+        }
+
+        try
+        {
+            foreach (var rawLine in File.ReadLines(keyFilePath))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#"))
+                    continue;
+
+                var separatorIndex = line.IndexOf('=');
+                if (separatorIndex < 0)
+                    separatorIndex = line.IndexOf(':');
+                if (separatorIndex <= 0)
+                    continue;
+
+                var key = NormalizeCoupangKeyName(line[..separatorIndex]);
+                var value = line[(separatorIndex + 1)..].Trim().Trim('"', '\'');
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                    values[key] = value;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"쿠팡 Wing API 키 파일 읽기 실패: {ex.Message}");
+        }
+
+        return values;
+    }
+
+    private static string ReadKeyFileValue(Dictionary<string, string> values, string propertyName, string fallback)
+    {
+        return values.TryGetValue(NormalizeCoupangKeyName(propertyName), out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : fallback;
+    }
+
+    private static string NormalizeCoupangKeyName(string value)
+    {
+        return new string(value
+            .Trim()
+            .ToLowerInvariant()
+            .Where(char.IsLetterOrDigit)
+            .ToArray());
     }
 
     private static string ReadString(JObject? section, string propertyName, string fallback)

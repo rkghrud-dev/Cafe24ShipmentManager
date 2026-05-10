@@ -12,6 +12,7 @@ public sealed class CoupangConfig
 {
     public bool Enabled { get; set; } = true;
     public string DisplayName { get; set; } = "";
+    public string KeyFilePath { get; set; } = "";
     public string VendorId { get; set; } = "";
     public string AccessKey { get; set; } = "";
     public string SecretKey { get; set; } = "";
@@ -141,12 +142,21 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
 
         try
         {
-            if (string.Equals(order.OrderStatus, "ACCEPT", StringComparison.OrdinalIgnoreCase))
+            var currentStatus = await TryQueryOrderStatusAsync(shipmentBoxId);
+            if (string.IsNullOrWhiteSpace(currentStatus))
+                currentStatus = order.OrderStatus;
+
+            if (string.Equals(currentStatus, "ACCEPT", StringComparison.OrdinalIgnoreCase))
             {
-                var acknowledge = await AcknowledgeAsync(shipmentBoxId);
+                var acknowledge = await PushDeliveryWaiting(order, trackingNumber, shippingCompanyCode);
                 if (!acknowledge.success)
                     return acknowledge;
+
+                currentStatus = "INSTRUCT";
             }
+
+            if (!string.Equals(currentStatus, "INSTRUCT", StringComparison.OrdinalIgnoreCase))
+                return (false, $"송장 업로드 가능한 쿠팡 상태가 아닙니다. 현재 상태: {currentStatus}", 0);
 
             var normalizedTrackingNumber = NormalizeInvoiceNumber(trackingNumber);
             if (!string.Equals(normalizedTrackingNumber, trackingNumber, StringComparison.Ordinal))
@@ -157,6 +167,38 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
         catch (Exception ex)
         {
             _log.Error($"[{DisplayName}] 쿠팡 송장 반영 예외: {order.OrderId}", ex);
+            return (false, ex.Message, 0);
+        }
+    }
+
+    public async Task<(bool success, string responseBody, int statusCode)> PushDeliveryWaiting(Cafe24Order order, string trackingNumber, string shippingCompanyCode)
+    {
+        if (!TryParseLong(order.ShippingCode, out var shipmentBoxId))
+            return (false, $"shipmentBoxId가 없어 상품준비중 처리를 진행할 수 없습니다. ({order.ShippingCode})", 0);
+
+        try
+        {
+            var currentStatus = await TryQueryOrderStatusAsync(shipmentBoxId);
+            if (string.Equals(currentStatus, "INSTRUCT", StringComparison.OrdinalIgnoreCase))
+                return (true, "이미 쿠팡 상품준비중 상태입니다.", 200);
+
+            if (!string.IsNullOrWhiteSpace(currentStatus) &&
+                !string.Equals(currentStatus, "ACCEPT", StringComparison.OrdinalIgnoreCase))
+                return (false, $"상품준비중 처리 가능한 쿠팡 상태가 아닙니다. 현재 상태: {currentStatus}", 0);
+
+            var acknowledge = await AcknowledgeAsync(shipmentBoxId);
+            if (!acknowledge.success)
+                return acknowledge;
+
+            var statusAfterAcknowledge = await WaitForOrderStatusAsync(shipmentBoxId, "INSTRUCT", attempts: 5, delay: TimeSpan.FromMilliseconds(1500));
+            if (!string.Equals(statusAfterAcknowledge, "INSTRUCT", StringComparison.OrdinalIgnoreCase))
+                return (false, "상품준비중 처리는 접수됐지만 쿠팡 상태가 아직 INSTRUCT로 바뀌지 않았습니다. 잠시 후 다시 시도하세요.", acknowledge.statusCode);
+
+            return acknowledge;
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"[{DisplayName}] 쿠팡 상품준비중 처리 예외: {order.OrderId}", ex);
             return (false, ex.Message, 0);
         }
     }
@@ -204,6 +246,74 @@ public sealed class CoupangApiClient : IMarketplaceApiClient
 
         _log.Info($"[{DisplayName}] 쿠팡 상품준비중 처리 성공: {shipmentBoxId}");
         return (true, body, statusCode);
+    }
+
+    private async Task<string> WaitForOrderStatusAsync(long shipmentBoxId, string expectedStatus, int attempts, TimeSpan delay)
+    {
+        var latestStatus = string.Empty;
+        for (var i = 0; i < attempts; i++)
+        {
+            latestStatus = await TryQueryOrderStatusAsync(shipmentBoxId);
+            if (string.Equals(latestStatus, expectedStatus, StringComparison.OrdinalIgnoreCase))
+                return latestStatus;
+
+            await Task.Delay(delay);
+        }
+
+        return latestStatus;
+    }
+
+    private async Task<string> TryQueryOrderStatusAsync(long shipmentBoxId)
+    {
+        try
+        {
+            var path = $"v2/providers/openapi/apis/api/v5/vendors/{_config.VendorId}/ordersheets/{shipmentBoxId}";
+            var response = await SendAsync(HttpMethod.Get, path, null, null);
+            var body = response != null ? await response.Content.ReadAsStringAsync() : "";
+            if (response == null || !response.IsSuccessStatusCode)
+            {
+                _log.Warn($"[{DisplayName}] 쿠팡 주문 상태 조회 실패: {shipmentBoxId} → {(int)(response?.StatusCode ?? 0)}: {body}");
+                return string.Empty;
+            }
+
+            return ExtractStatus(JToken.Parse(body));
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"[{DisplayName}] 쿠팡 주문 상태 조회 예외: {shipmentBoxId} / {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    private static string ExtractStatus(JToken token)
+    {
+        if (token is JObject obj)
+        {
+            foreach (var key in new[] { "status", "orderStatus", "orderSheetStatus" })
+            {
+                var value = obj[key]?.ToString();
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+
+            foreach (var child in obj.Properties().Select(property => property.Value))
+            {
+                var value = ExtractStatus(child);
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+        }
+        else if (token is JArray array)
+        {
+            foreach (var child in array)
+            {
+                var value = ExtractStatus(child);
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+        }
+
+        return string.Empty;
     }
 
     private async Task<(bool success, string responseBody, int statusCode)> UploadInvoiceAsync(long orderId, long shipmentBoxId, long vendorItemId, string trackingNumber, string shippingCompanyCode)

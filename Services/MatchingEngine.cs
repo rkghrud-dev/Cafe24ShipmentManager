@@ -29,7 +29,7 @@ public class MatchingEngine
     }
 
     /// <summary>
-    /// 출고정보 행 목록과 캐시된 Cafe24 주문을 매칭
+    /// 출고정보 행 목록과 캐시된 마켓 주문을 매칭
     /// </summary>
     public List<MatchResult> ExecuteMatching(List<ShipmentSourceRow> sourceRows)
     {
@@ -78,7 +78,7 @@ public class MatchingEngine
                 continue;
             }
 
-            var candidates = phoneIndex.GetValueOrDefault(src.RecipientPhone, new());
+            var candidates = PreferOrdersBySourceMarket(src, phoneIndex.GetValueOrDefault(src.RecipientPhone, new()));
 
             if (candidates.Count == 0)
             {
@@ -136,8 +136,8 @@ public class MatchingEngine
                         Cafe24OrderCacheId = c.Id,
                         Cafe24OrderId = c.OrderId,
                         Cafe24OrderItemCode = c.OrderItemCode,
-                    Cafe24MallId = c.MallId,
-                    Cafe24MarketName = c.MarketName,
+                        Cafe24MallId = c.MallId,
+                        Cafe24MarketName = c.MarketName,
                         Confidence = "exact",
                         MatchStatus = "auto_confirmed",
                         ChosenByUser = false,
@@ -162,8 +162,8 @@ public class MatchingEngine
                             Cafe24OrderCacheId = c.Id,
                             Cafe24OrderId = c.OrderId,
                             Cafe24OrderItemCode = c.OrderItemCode,
-                    Cafe24MallId = c.MallId,
-                    Cafe24MarketName = c.MarketName,
+                            Cafe24MallId = c.MallId,
+                            Cafe24MarketName = c.MarketName,
                             Confidence = "candidate",
                             MatchStatus = "pending",
                             ChosenByUser = false,
@@ -186,7 +186,7 @@ public class MatchingEngine
     }
 
     /// <summary>
-    /// 역방향 매칭: Cafe24 주문 기준으로 스프레드시트에서 송장 검색
+    /// 역방향 매칭: 마켓 주문 기준으로 스프레드시트에서 송장 검색
     /// (전화번호 우선, 실패 시 수령인명으로 폴백)
     /// </summary>
     public List<MatchResult> ExecuteReverseMatching(List<Cafe24Order> orders, List<ShipmentSourceRow> sheetRows)
@@ -224,10 +224,10 @@ public class MatchingEngine
         // 디버깅: 샘플 데이터 출력
         var sampleSheetPhones = phoneIndex.Keys.Take(3).ToList();
         var sampleSheetNames = nameIndex.Keys.Take(3).ToList();
-        var sampleOrderPhones = orders.Take(3).Select(o => $"'{o.RecipientName}'/{o.RecipientCellPhone}").ToList();
+        var sampleOrderPhones = orders.Take(3).Select(o => $"'{o.MarketName}'/'{o.RecipientName}'/{o.RecipientCellPhone}").ToList();
         _log.Info($"[샘플] 시트 전화번호: {string.Join(", ", sampleSheetPhones)}");
         _log.Info($"[샘플] 시트 수령인명: {string.Join(", ", sampleSheetNames)}");
-        _log.Info($"[샘플] Cafe24 주문: {string.Join(", ", sampleOrderPhones)}");
+        _log.Info($"[샘플] 마켓 주문: {string.Join(", ", sampleOrderPhones)}");
 
         int exactCount = 0, noTrackingCount = 0, candidateCount = 0, noMatchCount = 0;
 
@@ -258,6 +258,7 @@ public class MatchingEngine
 
             // 중복 제거
             candidates = candidates.DistinctBy(r => r.Id > 0 ? (object)r.Id : r.SourceRowKey).ToList();
+            candidates = PreferSourceRowsByOrderMarket(order, candidates);
 
             if (candidates.Count == 0)
             {
@@ -358,8 +359,8 @@ public class MatchingEngine
                         Cafe24OrderCacheId = order.Id,
                         Cafe24OrderId = order.OrderId,
                         Cafe24OrderItemCode = order.OrderItemCode,
-                    Cafe24MallId = order.MallId,
-                    Cafe24MarketName = order.MarketName,
+                        Cafe24MallId = order.MallId,
+                        Cafe24MarketName = order.MarketName,
                         Confidence = "exact",
                         MatchStatus = "auto_confirmed",
                         ChosenByUser = false,
@@ -384,8 +385,8 @@ public class MatchingEngine
                             Cafe24OrderCacheId = order.Id,
                             Cafe24OrderId = order.OrderId,
                             Cafe24OrderItemCode = order.OrderItemCode,
-                    Cafe24MallId = order.MallId,
-                    Cafe24MarketName = order.MarketName,
+                            Cafe24MallId = order.MallId,
+                            Cafe24MarketName = order.MarketName,
                             Confidence = "candidate",
                             MatchStatus = "pending",
                             ChosenByUser = false,
@@ -405,6 +406,72 @@ public class MatchingEngine
 
         _log.Info($"역매칭 완료: 확정 {exactCount}, 후보선택필요 {candidateCount}, 송장없음 {noTrackingCount}, 미매칭 {noMatchCount}");
         return results;
+    }
+
+    private static List<Cafe24Order> PreferOrdersBySourceMarket(ShipmentSourceRow sourceRow, List<Cafe24Order> candidates)
+    {
+        if (candidates.Count <= 1)
+            return candidates;
+
+        var preferred = candidates.Where(order => IsMarketCompatible(sourceRow.VendorName, order)).ToList();
+        return preferred.Count > 0 ? preferred : candidates;
+    }
+
+    private static List<ShipmentSourceRow> PreferSourceRowsByOrderMarket(Cafe24Order order, List<ShipmentSourceRow> candidates)
+    {
+        if (candidates.Count <= 1)
+            return candidates;
+
+        var preferred = candidates.Where(row => IsMarketCompatible(row.VendorName, order)).ToList();
+        return preferred.Count > 0 ? preferred : candidates;
+    }
+
+    private static bool IsMarketCompatible(string? vendorName, Cafe24Order order)
+    {
+        var vendor = vendorName ?? "";
+        var orderMarket = string.IsNullOrWhiteSpace(order.MarketName) ? order.MallId : order.MarketName;
+        var normalizedVendor = NormalizeMarketName(vendor);
+        var normalizedOrderMarket = NormalizeMarketName(orderMarket);
+        if (string.IsNullOrWhiteSpace(normalizedVendor) || string.IsNullOrWhiteSpace(normalizedOrderMarket))
+            return false;
+
+        var orderIsCoupang = MarketplaceSourceKey.IsCoupang(order.MallId);
+        var vendorMentionsCoupang = MentionsCoupang(vendor);
+        var vendorMentionsCafe24 = MentionsCafe24(vendor);
+
+        if (orderIsCoupang && vendorMentionsCafe24)
+            return false;
+        if (!orderIsCoupang && vendorMentionsCoupang)
+            return false;
+
+        return normalizedVendor.Contains(normalizedOrderMarket, StringComparison.OrdinalIgnoreCase) ||
+               normalizedOrderMarket.Contains(normalizedVendor, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeMarketName(string? value)
+    {
+        return (value ?? "")
+            .Trim()
+            .ToLowerInvariant()
+            .Replace(" ", "")
+            .Replace("_", "")
+            .Replace("-", "")
+            .Replace("/", "")
+            .Replace("(", "")
+            .Replace(")", "")
+            .Replace(".", "")
+            .Replace("cafe24", "");
+    }
+
+    private static bool MentionsCoupang(string value)
+    {
+        return value.Contains("쿠팡", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("coupang", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MentionsCafe24(string value)
+    {
+        return value.Contains("cafe24", StringComparison.OrdinalIgnoreCase);
     }
 
     private string DetermineReverseConfidence(Cafe24Order order, ShipmentSourceRow src, bool usedNameFallback = false)
