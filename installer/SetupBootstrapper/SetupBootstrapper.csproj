@@ -7,10 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Cafe24ShipmentManager-Setup</AssemblyName>
     <RootNamespace>Cafe24ShipmentManager.Setup</RootNamespace>
+    <ApplicationIcon>..\..\Assets\app-icon.ico</ApplicationIcon>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="..\..\Assets\app-icon.ico" Link="Assets\app-icon.ico" />
     <EmbeddedResource Include="Payload\Cafe24ShipmentManager.zip" LogicalName="Payload.Cafe24ShipmentManager.zip" />
     <EmbeddedResource Include="Payload\Cafe24Auth.zip" LogicalName="Payload.Cafe24Auth.zip" />
   </ItemGroup>
