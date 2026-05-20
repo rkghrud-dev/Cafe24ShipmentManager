@@ -9,6 +9,7 @@ public class ShipmentSourceRow
     public string RecipientPhone { get; set; } = ""; // 정규화된 휴대폰
     public string RecipientName { get; set; } = "";  // F열: 수령인명
     public string ProductCode { get; set; } = "";    // B열: 상품코드
+    public int OrderQuantity { get; set; }            // 내품수량
     public string OrderDate { get; set; } = "";      // D열: 발주일
     public string ShippingCompany { get; set; } = "";
     public string RawData { get; set; } = "";        // JSON: 원본 행 전체

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Reflection;
 using Cafe24ShipmentManager.Data;
@@ -35,6 +36,7 @@ public partial class MainForm : Form
     private const int StockDefaultSheetGid = 2073400281;
     private const string PendingShipmentSheetName = "미출고 정보";
     private const string PreferredShipmentSheetName = "cj발주서";
+    private const string ProductInfoSheetName = "상품정보";
     private string _pendingShipmentWindowLabel = "";
 
     // ── State ──
@@ -489,13 +491,41 @@ public partial class MainForm : Form
             .Replace("cafe24", "");
     }
 
-    private void ApplyMatchResultOrderFlags()
+    private void ApplyMatchResultOrderFlags(IReadOnlyDictionary<string, ProductStockInfo>? productStockLookup = null)
     {
+        var todayOrderQuantityByProductCode = BuildTodayOrderQuantityByProductCode(_filteredRows);
+
         foreach (var matchResult in _matchResults)
         {
             var order = FindOrderForMatch(matchResult);
             matchResult.PendingShipment = order?.PendingShipment == true;
             matchResult.PendingShipmentMessage = order?.PendingShipmentMessage ?? "";
+            if (matchResult.OrderQuantity <= 0)
+                matchResult.OrderQuantity = order?.Quantity ?? 0;
+
+            var productCode = NormalizeProductCode(matchResult.ProductCode);
+            matchResult.ProductCode = productCode;
+
+            if (!string.IsNullOrWhiteSpace(productCode) &&
+                todayOrderQuantityByProductCode.TryGetValue(productCode, out var totalOrderQuantity))
+            {
+                matchResult.TotalOrderQuantity = totalOrderQuantity;
+            }
+
+            if (!string.IsNullOrWhiteSpace(productCode) &&
+                productStockLookup != null &&
+                productStockLookup.TryGetValue(productCode, out var stockInfo))
+            {
+                matchResult.StockQuantityText = stockInfo.DisplayText;
+                matchResult.StockQuantity = stockInfo.Quantity;
+                matchResult.IsStockShortage = stockInfo.Quantity - matchResult.TotalOrderQuantity <= 0;
+            }
+            else
+            {
+                matchResult.StockQuantityText = "";
+                matchResult.StockQuantity = null;
+                matchResult.IsStockShortage = false;
+            }
         }
 
         _matchResults = _matchResults
@@ -504,6 +534,94 @@ public partial class MainForm : Form
             .ThenBy(matchResult => matchResult.Cafe24OrderId, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
+
+    private async Task<IReadOnlyDictionary<string, ProductStockInfo>> LoadProductInfoStockLookupAsync(GoogleSheetsReader sheetsReader)
+    {
+        try
+        {
+            btnMatch.Text = "상품정보 재고 확인 중...";
+            var raw = await Task.Run(() => sheetsReader.ReadRawSheet(_spreadsheetId, ProductInfoSheetName, 30000));
+            var result = new Dictionary<string, ProductStockInfo>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var row in raw.Rows)
+            {
+                var productCode = NormalizeProductCode(GetRawCell(row, 0));
+                if (string.IsNullOrWhiteSpace(productCode))
+                    continue;
+
+                var stockText = GetRawCell(row, 3);
+                var stockQuantity = ParseStockQuantity(stockText);
+                if (!stockQuantity.HasValue)
+                    continue;
+
+                result[productCode] = new ProductStockInfo(stockText, stockQuantity.Value);
+            }
+
+            _log.Info($"상품정보 재고 로드: {result.Count}개 상품");
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"상품정보 시트 재고 로드 실패: {ex.Message}");
+            return new Dictionary<string, ProductStockInfo>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static Dictionary<string, int> BuildTodayOrderQuantityByProductCode(IEnumerable<ShipmentSourceRow> rows)
+    {
+        var today = DateTime.Today;
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var row in rows)
+        {
+            var productCode = NormalizeProductCode(row.ProductCode);
+            if (string.IsNullOrWhiteSpace(productCode) || !IsTodayOrderDate(row.OrderDate, today))
+                continue;
+
+            var quantity = row.OrderQuantity > 0 ? row.OrderQuantity : 1;
+            result[productCode] = result.GetValueOrDefault(productCode) + quantity;
+        }
+
+        return result;
+    }
+
+    private static bool IsTodayOrderDate(string raw, DateTime today)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        if (DateTime.TryParse(raw, CultureInfo.CurrentCulture, DateTimeStyles.None, out var parsed) ||
+            DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+        {
+            return parsed.Date == today.Date;
+        }
+
+        var trimmed = raw.Trim();
+        return trimmed.StartsWith(today.ToString("yyyy-MM-dd"), StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith(today.ToString("yyyy.MM.dd"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static decimal? ParseStockQuantity(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+
+        var cleaned = raw.Replace(",", "").Trim();
+        var numeric = new string(cleaned.Where(ch => char.IsDigit(ch) || ch == '-' || ch == '.').ToArray());
+        if (decimal.TryParse(numeric, NumberStyles.Any, CultureInfo.InvariantCulture, out var value))
+            return value;
+        if (decimal.TryParse(numeric, NumberStyles.Any, CultureInfo.CurrentCulture, out value))
+            return value;
+        return null;
+    }
+
+    private static string NormalizeProductCode(string? value)
+        => (value ?? "").Trim().ToUpperInvariant();
+
+    private static string GetRawCell(IReadOnlyList<string> row, int index)
+        => index >= 0 && index < row.Count ? row[index].Trim() : "";
+
+    private sealed record ProductStockInfo(string DisplayText, decimal Quantity);
     // ═══════════════════════════════════════
     // 초기화: 인증 → 시트목록 → 발주사 자동 로드
     // ═══════════════════════════════════════
@@ -1406,9 +1524,11 @@ public partial class MainForm : Form
 
             btnMatch.Text = "매칭 중...";
 
+            var productStockLookup = await LoadProductInfoStockLookupAsync(sheetsReader);
+
             // 역방향 매칭: Cafe24 주문 기준 → 스프레드시트 검색
             _matchResults = await Task.Run(() => _matcher.ExecuteReverseMatching(_cafe24Orders, _filteredRows));
-            ApplyMatchResultOrderFlags();
+            ApplyMatchResultOrderFlags(productStockLookup);
             foreach (var mr in _matchResults)
             {
                 if (mr.SourceRowId > 0)
@@ -1541,11 +1661,17 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("OrdPhone", "주문-휴대폰");
         dgvMatch.Columns.Add("OrdName", "주문-수령인");
         dgvMatch.Columns.Add("OrdProduct", "상품명");
+        dgvMatch.Columns.Add("OrderQty", "발주수량");
+        dgvMatch.Columns.Add("TotalOrderQty", "전체발주수량");
+        dgvMatch.Columns.Add("StockQty", "실재고값");
         dgvMatch.Columns.Add("Confidence", "확신도");
         dgvMatch.Columns.Add("MStatus", "상태");
 
         dgvMatch.Columns["MrId"]!.Width = 40;
         dgvMatch.Columns["Cafe24Market"]!.Width = 90;
+        dgvMatch.Columns["OrderQty"]!.Width = 75;
+        dgvMatch.Columns["TotalOrderQty"]!.Width = 95;
+        dgvMatch.Columns["StockQty"]!.Width = 80;
         dgvMatch.Columns["Confidence"]!.Width = 70;
         dgvMatch.Columns["MStatus"]!.Width = 100;
 
@@ -1556,10 +1682,16 @@ public partial class MainForm : Form
             var auto = mr.MatchStatus == "auto_confirmed" && !mr.PendingShipment;
             var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
                 mr.SourceTracking, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
-                mr.OrderProduct, ConfLabel(mr.Confidence), ResolveMatchStatusLabel(mr));
+                mr.OrderProduct, mr.OrderQuantity, mr.TotalOrderQuantity, mr.StockQuantityText,
+                ConfLabel(mr.Confidence), ResolveMatchStatusLabel(mr));
 
             dgvMatch.Rows[idx].DefaultCellStyle.BackColor = ResolveMatchRowBackColor(mr);
             dgvMatch.Rows[idx].DefaultCellStyle.ForeColor = UiPalette.Text;
+            if (mr.IsStockShortage)
+            {
+                dgvMatch.Rows[idx].Cells["StockQty"].Style.BackColor = Color.FromArgb(220, 53, 69);
+                dgvMatch.Rows[idx].Cells["StockQty"].Style.ForeColor = Color.White;
+            }
         }
 
         _log.Info($"매칭: 전체 {_matchResults.Count} | " +

@@ -182,7 +182,7 @@ internal static class Program
 
     private static void Install(bool createDesktopShortcut, bool launchAfterInstall)
     {
-        StopRunningMainApp();
+        StopRunningApps();
         Directory.CreateDirectory(InstallRoot);
 
         var tempRoot = Path.Combine(Path.GetTempPath(), "Cafe24ShipmentManagerInstall_" + Guid.NewGuid().ToString("N"));
@@ -268,7 +268,7 @@ internal static class Program
                 return;
         }
 
-        StopRunningMainApp();
+        StopRunningApps();
         DeletePath(DesktopShortcut);
         DeleteRegistryTree(Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + AppId);
         DeletePath(InstallRoot);
@@ -337,6 +337,31 @@ internal static class Program
         if (string.IsNullOrWhiteSpace(path))
             return;
 
+        const int maxAttempts = 8;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                DeletePathOnce(path);
+                return;
+            }
+            catch (IOException) when (attempt < maxAttempts)
+            {
+                StopRunningApps();
+                Thread.Sleep(500);
+            }
+            catch (UnauthorizedAccessException) when (attempt < maxAttempts)
+            {
+                StopRunningApps();
+                Thread.Sleep(500);
+            }
+        }
+
+        DeletePathOnce(path);
+    }
+
+    private static void DeletePathOnce(string path)
+    {
         if (File.Exists(path))
         {
             File.SetAttributes(path, FileAttributes.Normal);
@@ -357,30 +382,39 @@ internal static class Program
 
     private static bool PathExists(string path) => File.Exists(path) || Directory.Exists(path);
 
-    private static void StopRunningMainApp()
+    private static void StopRunningApps()
     {
-        foreach (var process in Process.GetProcessesByName("Cafe24ShipmentManager"))
+        StopProcessesByName("Cafe24ShipmentManager");
+        StopProcessesByName("Cafe24Auth");
+    }
+
+    private static void StopProcessesByName(string processName)
+    {
+        foreach (var process in Process.GetProcessesByName(processName))
+            StopProcess(process);
+    }
+
+    private static void StopProcess(Process process)
+    {
+        try
         {
-            try
+            if (!process.HasExited)
             {
-                if (!process.HasExited)
-                {
-                    process.CloseMainWindow();
-                    process.WaitForExit(1200);
-                }
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(3000);
-                }
+                process.CloseMainWindow();
+                process.WaitForExit(1200);
             }
-            catch
+            if (!process.HasExited)
             {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(3000);
             }
-            finally
-            {
-                process.Dispose();
-            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            process.Dispose();
         }
     }
 

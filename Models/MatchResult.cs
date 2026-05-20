@@ -21,6 +21,12 @@ public class MatchResult
     public string OrderPhone { get; set; } = "";
     public string OrderName { get; set; } = "";
     public string OrderProduct { get; set; } = "";
+    public string ProductCode { get; set; } = "";
+    public int OrderQuantity { get; set; }
+    public int TotalOrderQuantity { get; set; }
+    public string StockQuantityText { get; set; } = "";
+    public decimal? StockQuantity { get; set; }
+    public bool IsStockShortage { get; set; }
     public bool PendingShipment { get; set; }
     public string PendingShipmentMessage { get; set; } = "";
 }

@@ -279,7 +279,8 @@ public class MatchingEngine
                     SourceTracking = "",
                     OrderPhone = order.RecipientCellPhone,
                     OrderName = order.RecipientName,
-                    OrderProduct = order.ProductName
+                    OrderProduct = order.ProductName,
+                    OrderQuantity = order.Quantity
                 });
                 noMatchCount++;
                 continue;
@@ -309,7 +310,9 @@ public class MatchingEngine
                     SourceTracking = "",
                     OrderPhone = order.RecipientCellPhone,
                     OrderName = order.RecipientName,
-                    OrderProduct = order.ProductName
+                    OrderProduct = order.ProductName,
+                    ProductCode = firstMatch.ProductCode,
+                    OrderQuantity = order.Quantity
                 });
                 noTrackingCount++;
                 continue;
@@ -336,7 +339,9 @@ public class MatchingEngine
                     SourceTracking = src.TrackingNumber,
                     OrderPhone = order.RecipientCellPhone,
                     OrderName = order.RecipientName,
-                    OrderProduct = order.ProductName
+                    OrderProduct = order.ProductName,
+                    ProductCode = src.ProductCode,
+                    OrderQuantity = order.Quantity
                 });
                 exactCount++;
             }
@@ -370,7 +375,9 @@ public class MatchingEngine
                         SourceTracking = src.TrackingNumber,
                         OrderPhone = order.RecipientCellPhone,
                         OrderName = order.RecipientName,
-                        OrderProduct = order.ProductName
+                        OrderProduct = order.ProductName,
+                        ProductCode = src.ProductCode,
+                        OrderQuantity = order.Quantity
                     });
                     exactCount++;
                 }
@@ -396,7 +403,9 @@ public class MatchingEngine
                             SourceTracking = src.TrackingNumber,
                             OrderPhone = order.RecipientCellPhone,
                             OrderName = order.RecipientName,
-                            OrderProduct = order.ProductName
+                            OrderProduct = order.ProductName,
+                            ProductCode = src.ProductCode,
+                            OrderQuantity = order.Quantity
                         });
                     }
                     candidateCount++;

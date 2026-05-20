@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using ClosedXML.Excel;
@@ -128,13 +129,7 @@ public partial class MainForm
             DropDownStyle = ComboBoxStyle.DropDown,
             Width = 150
         };
-        _cboOrderExportMarketEx.Items.AddRange(new object[]
-        {
-            ShipmentRequestOrderExportFormatterEx.DefaultMarketName,
-            "반짝세일",
-            "스마트스토어"
-        });
-        _cboOrderExportMarketEx.Text = ShipmentRequestOrderExportFormatterEx.DefaultMarketName;
+        LoadOrderExportMarketHistoryEx();
 
         _dtpOrderExportDateEx = new DateTimePicker
         {
@@ -463,9 +458,11 @@ public partial class MainForm
         var rows = BuildOrderExportRowsEx(orders);
         var validCount = rows.Count(row => !string.IsNullOrWhiteSpace(row.ProductCode));
         var missingCount = rows.Count - validCount;
+        var optionIssueCount = rows.Count(row => row.HasOptionIssue);
         var extraColumnCount = CurrentOrderExportLeadingColumnCountEx;
         var extraSummary = extraColumnCount > 0 ? $" / 앞열 추가 {extraColumnCount}칸" : "";
-        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건{extraSummary}\n빈칸 건은 맨 위로 복사됩니다.";
+        var issueSummary = optionIssueCount > 0 ? $" / 옵션 확인 {optionIssueCount}건" : "";
+        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건{issueSummary}{extraSummary}\n빈칸 건은 맨 위로 복사됩니다.";
 
         if (_itemOrderExportCopyEx != null) _itemOrderExportCopyEx.Enabled = true;
         if (_itemOrderExportSaveEx != null) _itemOrderExportSaveEx.Enabled = true;
@@ -506,14 +503,16 @@ public partial class MainForm
         if (!TryPrepareOrderExportRowsEx(orders, out var rows))
             return;
 
-        var clipboardText = ShipmentRequestOrderExportFormatterEx.BuildClipboardText(
+        SaveOrderExportMarketHistoryEx(CurrentOrderExportMarketNameEx);
+
+        var clipboardData = ShipmentRequestOrderExportFormatterEx.BuildClipboardDataObject(
             rows,
             CurrentOrderExportIncludeSupplierProductEx,
             CurrentOrderExportIncludeOptionEx);
 
         try
         {
-            Clipboard.SetText(clipboardText, TextDataFormat.UnicodeText);
+            Clipboard.SetDataObject(clipboardData, true);
         }
         catch (Exception ex)
         {
@@ -565,6 +564,8 @@ public partial class MainForm
 
         if (!TryPrepareOrderExportRowsEx(orders, out var rows))
             return;
+
+        SaveOrderExportMarketHistoryEx(CurrentOrderExportMarketNameEx);
 
         ShipmentRequestOrderExportFormatterEx.SaveRowsAsWorkbook(
             rows,
@@ -662,8 +663,11 @@ public partial class MainForm
     private bool TryPrepareOrderExportRowsEx(IReadOnlyCollection<Cafe24Order> orders, out List<ShipmentRequestOrderRowEx> rows)
     {
         rows = BuildOrderExportRowsEx(orders);
+        ShowOrderExportOptionIssuesEx(rows);
+
         var missingRows = rows
-            .Where(row => string.IsNullOrWhiteSpace(row.ProductCode) &&
+            .Where(row => !row.HasOptionIssue &&
+                          string.IsNullOrWhiteSpace(row.ProductCode) &&
                           !string.IsNullOrWhiteSpace(row.ProductMatchKey))
             .GroupBy(row => row.ProductMatchKey, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
@@ -716,9 +720,122 @@ public partial class MainForm
         return true;
     }
 
+    private void ShowOrderExportOptionIssuesEx(IReadOnlyList<ShipmentRequestOrderRowEx> rows)
+    {
+        var issueRows = rows.Where(row => row.HasOptionIssue).ToList();
+        if (issueRows.Count == 0)
+            return;
+
+        var missingOptionCount = issueRows.Count(row => string.Equals(row.OptionIssue, ShipmentRequestOrderExportFormatterEx.OptionIssueMissing, StringComparison.OrdinalIgnoreCase));
+        var noLetterCount = issueRows.Count(row => string.Equals(row.OptionIssue, ShipmentRequestOrderExportFormatterEx.OptionIssueNoLetter, StringComparison.OrdinalIgnoreCase));
+
+        var sb = new StringBuilder();
+        sb.AppendLine("옵션 매칭이 안 된 주문은 상품코드를 빈칸으로 두고 맨 위로 올립니다.");
+        sb.AppendLine();
+        sb.AppendLine($"옵션 없음: {missingOptionCount}건");
+        sb.AppendLine($"옵션 문자 없음: {noLetterCount}건");
+        sb.AppendLine();
+
+        foreach (var row in issueRows.Take(30))
+        {
+            var option = string.IsNullOrWhiteSpace(row.ProductOption) ? "(옵션 없음)" : row.ProductOption;
+            sb.AppendLine($"- [{row.OptionIssue}] {row.SupplierProductName} / {option} / {row.RecipientName}");
+        }
+
+        if (issueRows.Count > 30)
+            sb.AppendLine($"...외 {issueRows.Count - 30}건");
+
+        MessageBox.Show(this, sb.ToString(), "출고용 옵션 확인", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
     private string CurrentOrderExportMarketNameEx => string.IsNullOrWhiteSpace(_cboOrderExportMarketEx?.Text)
         ? ShipmentRequestOrderExportFormatterEx.DefaultMarketName
         : _cboOrderExportMarketEx.Text.Trim();
+
+    private string GetOrderExportMarketHistoryPathEx()
+    {
+        var dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, "order_export_market_history.json");
+    }
+
+    private void LoadOrderExportMarketHistoryEx()
+    {
+        if (_cboOrderExportMarketEx == null)
+            return;
+
+        var markets = new List<string>();
+        try
+        {
+            var path = GetOrderExportMarketHistoryPathEx();
+            if (File.Exists(path))
+            {
+                var saved = Newtonsoft.Json.JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(path));
+                if (saved != null)
+                    markets.AddRange(saved);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"출고용 마켓명 이력 로드 실패: {ex.Message}");
+        }
+
+        foreach (var fallback in new[] { ShipmentRequestOrderExportFormatterEx.DefaultMarketName, "반짝세일", "스마트스토어" })
+        {
+            if (!markets.Any(market => string.Equals(market, fallback, StringComparison.OrdinalIgnoreCase)))
+                markets.Add(fallback);
+        }
+
+        markets = markets
+            .Where(market => !string.IsNullOrWhiteSpace(market))
+            .Select(market => market.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(30)
+            .ToList();
+
+        _cboOrderExportMarketEx.Items.Clear();
+        _cboOrderExportMarketEx.Items.AddRange(markets.Cast<object>().ToArray());
+        _cboOrderExportMarketEx.Text = markets.Count > 0 ? markets[0] : ShipmentRequestOrderExportFormatterEx.DefaultMarketName;
+    }
+
+    private void SaveOrderExportMarketHistoryEx(string marketName)
+    {
+        if (string.IsNullOrWhiteSpace(marketName))
+            return;
+
+        try
+        {
+            var normalized = marketName.Trim();
+            var markets = new List<string> { normalized };
+            if (_cboOrderExportMarketEx != null)
+            {
+                markets.AddRange(_cboOrderExportMarketEx.Items
+                    .Cast<object>()
+                    .Select(item => item?.ToString()?.Trim() ?? "")
+                    .Where(item => !string.IsNullOrWhiteSpace(item)));
+            }
+
+            markets = markets
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(30)
+                .ToList();
+
+            File.WriteAllText(
+                GetOrderExportMarketHistoryPathEx(),
+                Newtonsoft.Json.JsonConvert.SerializeObject(markets, Newtonsoft.Json.Formatting.Indented));
+
+            if (_cboOrderExportMarketEx != null)
+            {
+                _cboOrderExportMarketEx.Items.Clear();
+                _cboOrderExportMarketEx.Items.AddRange(markets.Cast<object>().ToArray());
+                _cboOrderExportMarketEx.Text = normalized;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"출고용 마켓명 이력 저장 실패: {ex.Message}");
+        }
+    }
 
     private DateTime CurrentOrderExportDateValueEx => _dtpOrderExportDateEx?.Value ?? DateTime.Today;
 
@@ -738,6 +855,8 @@ internal sealed class ShipmentRequestOrderRowEx
     public string ProductOption { get; init; } = string.Empty;
     public string ProductMatchKey { get; init; } = string.Empty;
     public string ProductCode { get; init; } = string.Empty;
+    public string OptionIssue { get; init; } = string.Empty;
+    public bool HasOptionIssue => !string.IsNullOrWhiteSpace(OptionIssue);
     public string MarketName { get; init; } = string.Empty;
     public string ExportDate { get; init; } = string.Empty;
     public int Quantity { get; init; }
@@ -752,6 +871,8 @@ internal sealed class ShipmentRequestOrderRowEx
 internal static class ShipmentRequestOrderExportFormatterEx
 {
     public const string DefaultMarketName = "홈런마켓";
+    public const string OptionIssueMissing = "옵션 없음";
+    public const string OptionIssueNoLetter = "옵션 문자 없음";
 
     private const string SupplierProductHeader = "공급사상품명";
     private const string ProductOptionHeader = "옵션";
@@ -770,7 +891,6 @@ internal static class ShipmentRequestOrderExportFormatterEx
         "수령인 상세 주소"
     };
 
-    private const string DefaultOptionLetter = "A";
     private static readonly Regex AssignedOptionLetterRegex = new("=\\s*([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
     private static readonly Regex StandaloneOptionLetterRegex = new("(?<![A-Za-z0-9])([A-Za-z])(?![A-Za-z0-9])", RegexOptions.Compiled);
     private static readonly Regex ProductCodeRegex = new("\\b([A-Z]{2,}\\d+[A-Z])\\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -793,9 +913,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
         IReadOnlyDictionary<string, string>? manualProductCodes = null)
     {
         var builtRows = orders.Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes)).ToList();
-        var blankRows = builtRows.Where(row => string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
-        var normalRows = builtRows.Where(row => !string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
-        return blankRows.Concat(normalRows).ToList();
+        var optionIssueRows = builtRows.Where(row => row.HasOptionIssue).ToList();
+        var blankRows = builtRows.Where(row => !row.HasOptionIssue && string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
+        var normalRows = builtRows.Where(row => !row.HasOptionIssue && !string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
+        return optionIssueRows.Concat(blankRows).Concat(normalRows).ToList();
     }
 
     public static string BuildPreview(
@@ -812,6 +933,17 @@ internal static class ShipmentRequestOrderExportFormatterEx
         bool includeOption = false)
     {
         return BuildDelimitedText(rows, false, includeSupplierProduct, includeOption);
+    }
+
+    public static DataObject BuildClipboardDataObject(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeSupplierProduct = false,
+        bool includeOption = false)
+    {
+        var data = new DataObject();
+        data.SetText(BuildClipboardText(rows, includeSupplierProduct, includeOption), TextDataFormat.UnicodeText);
+        data.SetData(DataFormats.Html, BuildClipboardHtml(rows, includeSupplierProduct, includeOption));
+        return data;
     }
 
     public static void SaveAsWorkbook(
@@ -862,6 +994,60 @@ internal static class ShipmentRequestOrderExportFormatterEx
             sb.AppendLine(string.Join("\t", BuildValues(row, includeSupplierProduct, includeOption)));
 
         return sb.ToString().TrimEnd('\r', '\n');
+    }
+
+    private static string BuildClipboardHtml(
+        IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeSupplierProduct,
+        bool includeOption)
+    {
+        var table = new StringBuilder();
+        table.Append("<table cellspacing=\"0\" cellpadding=\"0\">");
+        foreach (var row in rows)
+        {
+            var rowColor = ResolveRowFillColor(row);
+            var rowStyle = string.IsNullOrWhiteSpace(rowColor) ? "" : $" style=\"background-color:{rowColor};\"";
+            table.Append("<tr").Append(rowStyle).Append('>');
+
+            foreach (var value in BuildValues(row, includeSupplierProduct, includeOption))
+            {
+                table.Append("<td style=\"mso-number-format:'\\@';border:1px solid #d9d9d9;\">")
+                    .Append(WebUtility.HtmlEncode(value))
+                    .Append("</td>");
+            }
+
+            table.Append("</tr>");
+        }
+
+        table.Append("</table>");
+        return ToHtmlClipboardFormat(table.ToString());
+    }
+
+    private static string ToHtmlClipboardFormat(string fragment)
+    {
+        const string startFragment = "<!--StartFragment-->";
+        const string endFragment = "<!--EndFragment-->";
+        var html = $"<html><body>{startFragment}{fragment}{endFragment}</body></html>";
+        var headerTemplate =
+            "Version:0.9\r\n" +
+            "StartHTML:0000000000\r\n" +
+            "EndHTML:0000000000\r\n" +
+            "StartFragment:0000000000\r\n" +
+            "EndFragment:0000000000\r\n";
+
+        var startHtml = Encoding.UTF8.GetByteCount(headerTemplate);
+        var startFragmentOffset = startHtml + Encoding.UTF8.GetByteCount(html[..html.IndexOf(startFragment, StringComparison.Ordinal)]);
+        var endFragmentOffset = startHtml + Encoding.UTF8.GetByteCount(html[..html.IndexOf(endFragment, StringComparison.Ordinal)]);
+        var endHtml = startHtml + Encoding.UTF8.GetByteCount(html);
+
+        var header =
+            "Version:0.9\r\n" +
+            $"StartHTML:{startHtml:D10}\r\n" +
+            $"EndHTML:{endHtml:D10}\r\n" +
+            $"StartFragment:{startFragmentOffset:D10}\r\n" +
+            $"EndFragment:{endFragmentOffset:D10}\r\n";
+
+        return header + html;
     }
 
     private static string[] BuildHeaders(bool includeSupplierProduct, bool includeOption)
@@ -916,9 +1102,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var supplierProductName = ResolveSupplierProductName(item, order);
         var optionText = ResolveOptionText(item);
         var baseProductCode = ResolveBaseProductCode(item, order);
-        var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+        var optionLetter = ResolveOptionLetter(optionText);
+        var finalProductCode = ApplyOptionLetter(baseProductCode, optionLetter);
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
-        finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
+        if (!optionLetter.HasIssue)
+            finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
 
         var detailAddress = receiver?["address2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -932,6 +1120,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
             ProductCode = finalProductCode,
+            OptionIssue = optionLetter.IssueReason,
             MarketName = marketName,
             ExportDate = orderDateText,
             Quantity = order.Quantity,
@@ -958,12 +1147,14 @@ internal static class ShipmentRequestOrderExportFormatterEx
                          ?? item?["vendorItemName"]?.ToString()
                          ?? string.Empty;
         var supplierProductName = item?["sellerProductName"]?.ToString()
-                                  ?? item?["vendorItemName"]?.ToString()
-                                  ?? order.ProductName;
+                                   ?? item?["vendorItemName"]?.ToString()
+                                   ?? order.ProductName;
         var baseProductCode = ResolveCoupangProductCode(item, order);
-        var finalProductCode = ApplyOptionLetter(baseProductCode, optionText);
+        var optionLetter = ResolveOptionLetter(optionText);
+        var finalProductCode = ApplyOptionLetter(baseProductCode, optionLetter);
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
-        finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
+        if (!optionLetter.HasIssue)
+            finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
 
         var detailAddress = receiver?["addr2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -981,6 +1172,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
             ProductCode = finalProductCode,
+            OptionIssue = optionLetter.IssueReason,
             MarketName = marketName,
             ExportDate = orderDateText,
             Quantity = order.Quantity,
@@ -1176,31 +1368,50 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return Regex.Replace(value.Trim(), "\\s+", " ").ToUpperInvariant();
     }
 
-    private static string ApplyOptionLetter(string baseProductCode, string optionText)
+    private static string ApplyOptionLetter(string baseProductCode, OptionLetterResolution optionLetter)
     {
         if (string.IsNullOrWhiteSpace(baseProductCode)) return string.Empty;
+        if (optionLetter.HasIssue || string.IsNullOrWhiteSpace(optionLetter.Letter))
+            return string.Empty;
 
         var normalized = baseProductCode.Trim().ToUpperInvariant();
-        var replacement = ExtractOptionLetter(optionText);
-        if (!string.IsNullOrWhiteSpace(replacement) && normalized.Length > 0 && char.IsLetter(normalized[^1]))
-            normalized = normalized[..^1] + replacement;
+        if (normalized.Length > 0 && char.IsLetter(normalized[^1]))
+            normalized = normalized[..^1] + optionLetter.Letter;
 
         return normalized;
     }
 
-    private static string? ExtractOptionLetter(string optionText)
+    private static OptionLetterResolution ResolveOptionLetter(string optionText)
     {
         if (string.IsNullOrWhiteSpace(optionText))
-            return DefaultOptionLetter;
+            return OptionLetterResolution.Issue(OptionIssueMissing);
 
         var assignedMatch = AssignedOptionLetterRegex.Match(optionText);
         if (assignedMatch.Success)
-            return assignedMatch.Groups[1].Value.ToUpperInvariant();
+            return OptionLetterResolution.Match(assignedMatch.Groups[1].Value.ToUpperInvariant());
 
         var standaloneMatches = StandaloneOptionLetterRegex.Matches(optionText);
-        return standaloneMatches.Count > 0
-            ? standaloneMatches[^1].Groups[1].Value.ToUpperInvariant()
-            : null;
+        if (standaloneMatches.Count > 0)
+            return OptionLetterResolution.Match(standaloneMatches[^1].Groups[1].Value.ToUpperInvariant());
+
+        return OptionLetterResolution.Issue(OptionIssueNoLetter);
+    }
+
+    private sealed class OptionLetterResolution
+    {
+        public string Letter { get; private init; } = string.Empty;
+        public string IssueReason { get; private init; } = string.Empty;
+        public bool HasIssue => !string.IsNullOrWhiteSpace(IssueReason);
+
+        public static OptionLetterResolution Match(string letter)
+        {
+            return new OptionLetterResolution { Letter = letter };
+        }
+
+        public static OptionLetterResolution Issue(string reason)
+        {
+            return new OptionLetterResolution { IssueReason = reason };
+        }
     }
 
     private static string ResolveRecipientPhone(JObject? receiver, Cafe24Order order)
@@ -1235,12 +1446,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
         for (int col = 0; col < headers.Length; col++)
             sheet.Cell(1, col + 1).Value = headers[col];
 
-        var blankCount = 0;
         for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
         {
             var row = rows[rowIndex];
             var excelRow = rowIndex + 2;
-            if (string.IsNullOrWhiteSpace(row.ProductCode)) blankCount++;
 
             var col = 1;
             if (includeSupplierProduct)
@@ -1261,15 +1470,22 @@ internal static class ShipmentRequestOrderExportFormatterEx
             sheet.Cell(excelRow, col++).Value = row.FullAddress;
             sheet.Cell(excelRow, col++).Value = string.IsNullOrWhiteSpace(row.ShippingMessage) ? null : row.ShippingMessage;
             sheet.Cell(excelRow, col).Value = row.DetailAddress;
-        }
 
-        if (blankCount > 0)
-        {
-            var blankRange = sheet.Range(2, 1, blankCount + 1, headers.Length);
-            blankRange.Style.Fill.BackgroundColor = XLColor.FromHtml("#D9D9D9");
+            var rowColor = ResolveRowFillColor(row);
+            if (!string.IsNullOrWhiteSpace(rowColor))
+                sheet.Range(excelRow, 1, excelRow, headers.Length).Style.Fill.BackgroundColor = XLColor.FromHtml(rowColor);
         }
 
         sheet.Columns().AdjustToContents();
+    }
+
+    private static string ResolveRowFillColor(ShipmentRequestOrderRowEx row)
+    {
+        if (row.HasOptionIssue)
+            return "#F4CCCC";
+        if (string.IsNullOrWhiteSpace(row.ProductCode))
+            return "#D9D9D9";
+        return string.Empty;
     }
 
     private static string Clean(string? value)

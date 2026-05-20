@@ -32,6 +32,10 @@ public class GoogleSheetsReader
         "진열입고산입송장번호", "진열입고산입송장", "송장번호", "운송장번호", "운송장", "송장"
     };
 
+    private static readonly string[] QuantityKeywords = {
+        "내품수량", "수량", "발주수량", "주문수량", "출고수량", "数量", "Qty", "Quantity"
+    };
+
     private static readonly Regex DateMarkerPattern = new(@"^20\d{2}\.\d{1,2}\.\d{1,2}$", RegexOptions.Compiled);
 
 
@@ -314,6 +318,7 @@ public class GoogleSheetsReader
         }
 
         var trackingColumnIndex = DetectTrackingColumn(result.Headers);
+        var quantityColumnIndex = DetectQuantityColumn(result.Headers);
 
         var vendorSet = new HashSet<string>();
 
@@ -327,6 +332,7 @@ public class GoogleSheetsReader
 
             var tracking = GetCell(trackingColumnIndex >= 0 ? trackingColumnIndex : 11); // L열 기본, cj발주서 진열입고산입 송장번호 우선
             var productCode = GetCell(1);       // B열: 상품코드
+            var orderQuantity = ParseInt(GetCell(quantityColumnIndex >= 0 ? quantityColumnIndex : -1));
             var orderDate = GetCell(3);          // D열: 발주일
             var recipientName = GetCell(5);     // F열: 수령인명
             var phone = result.PhoneColumnIndex >= 0 ? GetCell(result.PhoneColumnIndex) : GetCell(6); // G열: 수령인 휴대폰
@@ -348,6 +354,7 @@ public class GoogleSheetsReader
                 RecipientPhone = normalizedPhone,
                 RecipientName = recipientName,
                 ProductCode = productCode,
+                OrderQuantity = orderQuantity,
                 OrderDate = orderDate,
                 ShippingCompany = shippingCompany,
                 RawData = JsonConvert.SerializeObject(rawDict),
@@ -499,6 +506,24 @@ public class GoogleSheetsReader
         }
 
         return headers.Count > 11 ? 11 : -1;
+    }
+
+    private static int DetectQuantityColumn(IReadOnlyList<string> headers)
+    {
+        for (int index = 0; index < headers.Count; index++)
+        {
+            var normalized = NormalizeHeader(headers[index]);
+            if (QuantityKeywords.Any(keyword => normalized.Contains(NormalizeHeader(keyword), StringComparison.OrdinalIgnoreCase)))
+                return index;
+        }
+
+        return -1;
+    }
+
+    private static int ParseInt(string raw)
+    {
+        var cleaned = Regex.Replace(CleanValue(raw), @"[^\d\-]", "");
+        return int.TryParse(cleaned, out var value) ? value : 0;
     }
 
     private static PendingShipmentWindow DetectPendingWindow(List<List<string>> rows, int headerRowIndex)
