@@ -18,6 +18,7 @@ public partial class MainForm
     private Button? _btnOrderDeselectAllEx;
     private Button? _btnOrderExportEx;
     private Label? _lblOrderSelectionEx;
+    private Button? _btnMarketCodeAuditEx;
     private ComboBox? _cboOrderExportMarketEx;
     private DateTimePicker? _dtpOrderExportDateEx;
     private CheckBox? _chkOrderExportSupplierProductEx;
@@ -75,18 +76,28 @@ public partial class MainForm
             ForeColor = Color.DimGray,
             Text = "선택 0 / 0"
         };
+        _btnMarketCodeAuditEx = new Button
+        {
+            Name = "btnMarketCodeAuditEx",
+            Text = "코드검수",
+            Width = 92,
+            Height = 30,
+            Location = new Point(505, 3)
+        };
 
         panel.Controls.AddRange(new Control[]
         {
             _btnOrderSelectAllEx,
             _btnOrderDeselectAllEx,
             _btnOrderExportEx,
-            _lblOrderSelectionEx
+            _lblOrderSelectionEx,
+            _btnMarketCodeAuditEx
         });
 
         _btnOrderSelectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(true);
         _btnOrderDeselectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(false);
         _btnOrderExportEx.Click += (_, _) => ShowOrderExportPopupMenuEx();
+        _btnMarketCodeAuditEx.Click += async (_, _) => await RunMarketCodeAuditExAsync();
 
         dgvData.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -102,6 +113,142 @@ public partial class MainForm
         EnsureOrderExportPopupMenuEx();
         EnsureOrderExportHistoryUi();
         UpdateOrderSelectionSummaryEx();
+    }
+
+    private async Task RunMarketCodeAuditExAsync()
+    {
+        var toolPath = ResolveMarketCodeBackfillToolPathEx();
+        if (string.IsNullOrWhiteSpace(toolPath))
+        {
+            MessageBox.Show(
+                "WEBOCR 코드 검수 실행 파일을 찾지 못했습니다.\n\n" +
+                "먼저 WEBOCRV2_LOCAL의 KeywordOcr.App.Tests 프로젝트를 한 번 빌드하세요.\n" +
+                "또는 WEBOCR_MARKET_CODE_BACKFILL_TOOL 환경변수에 실행 파일 경로를 지정하세요.",
+                "코드검수 실행 파일 없음",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        try
+        {
+            if (_btnMarketCodeAuditEx != null)
+            {
+                _btnMarketCodeAuditEx.Enabled = false;
+                _btnMarketCodeAuditEx.Text = "검수중...";
+            }
+
+            lblStatus.Text = "WEBOCR 마켓 상품코드 검수 중...";
+            lblStatus.ForeColor = Color.Gray;
+            _log.Info($"WEBOCR 코드검수 실행: {toolPath}");
+
+            var result = await Task.Run(() => RunMarketCodeBackfillToolEx(toolPath));
+            if (result.ExitCode != 0)
+            {
+                _log.Error($"WEBOCR 코드검수 실패 exit={result.ExitCode}\n{result.Output}");
+                MessageBox.Show(
+                    $"코드검수 실패:\n{ShortMessageEx(result.Output)}",
+                    "코드검수 실패",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                lblStatus.Text = "WEBOCR 코드검수 실패";
+                lblStatus.ForeColor = Color.DarkRed;
+                return;
+            }
+
+            var reportPath = ExtractMarketCodeReportPathEx(result.Output);
+            _log.Info($"WEBOCR 코드검수 완료: {reportPath}");
+            lblStatus.Text = string.IsNullOrWhiteSpace(reportPath)
+                ? "WEBOCR 코드검수 완료"
+                : $"WEBOCR 코드검수 완료: {Path.GetFileName(reportPath)}";
+            lblStatus.ForeColor = Color.DarkGreen;
+
+            if (!string.IsNullOrWhiteSpace(reportPath) && File.Exists(reportPath))
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(reportPath)
+                {
+                    UseShellExecute = true
+                });
+            }
+
+            MessageBox.Show(
+                string.IsNullOrWhiteSpace(reportPath)
+                    ? "코드검수 리포트 생성이 완료되었습니다."
+                    : $"코드검수 리포트를 생성했습니다.\n\n{reportPath}",
+                "코드검수 완료",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _log.Error("WEBOCR 코드검수 실행 실패", ex);
+            MessageBox.Show($"코드검수 실행 오류:\n{ex.Message}", "코드검수 오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            lblStatus.Text = "WEBOCR 코드검수 오류";
+            lblStatus.ForeColor = Color.DarkRed;
+        }
+        finally
+        {
+            if (_btnMarketCodeAuditEx != null)
+            {
+                _btnMarketCodeAuditEx.Enabled = true;
+                _btnMarketCodeAuditEx.Text = "코드검수";
+            }
+        }
+    }
+
+    private static (int ExitCode, string Output) RunMarketCodeBackfillToolEx(string toolPath)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = toolPath,
+            WorkingDirectory = Path.GetDirectoryName(toolPath) ?? AppContext.BaseDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        startInfo.ArgumentList.Add("--market-code-backfill-report");
+
+        using var process = System.Diagnostics.Process.Start(startInfo)
+            ?? throw new InvalidOperationException("코드검수 프로세스를 시작하지 못했습니다.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        var output = string.IsNullOrWhiteSpace(stderr)
+            ? stdout
+            : stdout + Environment.NewLine + stderr;
+        return (process.ExitCode, output);
+    }
+
+    private static string? ResolveMarketCodeBackfillToolPathEx()
+    {
+        var envPath = Environment.GetEnvironmentVariable("WEBOCR_MARKET_CODE_BACKFILL_TOOL");
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var candidates = new[]
+        {
+            envPath,
+            Path.Combine(desktop, "WEBOCRV2_LOCAL", "KeywordOcr.App.Tests", "bin", "Debug", "net8.0-windows", "win-x64", "KeywordOcr.App.Tests.exe"),
+            Path.Combine(desktop, "WEBOCRV2_LOCAL", "KeywordOcr.App.Tests", "bin", "Release", "net8.0-windows", "win-x64", "KeywordOcr.App.Tests.exe"),
+            Path.Combine(AppContext.BaseDirectory, "KeywordOcr.App.Tests.exe"),
+        };
+
+        return candidates.FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path));
+    }
+
+    private static string ExtractMarketCodeReportPathEx(string output)
+    {
+        var match = Regex.Match(output, @"report=(.+?)(?:\r?\n|$)", RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value.Trim().Trim('"') : "";
+    }
+
+    private static string ShortMessageEx(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "상세 오류가 비어 있습니다.";
+        value = value.Trim();
+        return value.Length <= 900 ? value : value[..900] + "...";
     }
 
     private void EnsureOrderSelectionColumnEx()
@@ -666,8 +813,7 @@ public partial class MainForm
         ShowOrderExportOptionIssuesEx(rows);
 
         var missingRows = rows
-            .Where(row => !row.HasOptionIssue &&
-                          string.IsNullOrWhiteSpace(row.ProductCode) &&
+            .Where(row => string.IsNullOrWhiteSpace(row.ProductCode) &&
                           !string.IsNullOrWhiteSpace(row.ProductMatchKey))
             .GroupBy(row => row.ProductMatchKey, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
@@ -854,6 +1000,7 @@ internal sealed class ShipmentRequestOrderRowEx
     public string SupplierProductName { get; init; } = string.Empty;
     public string ProductOption { get; init; } = string.Empty;
     public string ProductMatchKey { get; init; } = string.Empty;
+    public string BaseProductCode { get; init; } = string.Empty;
     public string ProductCode { get; init; } = string.Empty;
     public string OptionIssue { get; init; } = string.Empty;
     public bool HasOptionIssue => !string.IsNullOrWhiteSpace(OptionIssue);
@@ -873,6 +1020,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
     public const string DefaultMarketName = "홈런마켓";
     public const string OptionIssueMissing = "옵션 없음";
     public const string OptionIssueNoLetter = "옵션 문자 없음";
+    public const string OptionIssueCodeMismatch = "옵션 코드 불일치";
 
     private const string SupplierProductHeader = "공급사상품명";
     private const string ProductOptionHeader = "옵션";
@@ -912,7 +1060,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
         string orderDateText,
         IReadOnlyDictionary<string, string>? manualProductCodes = null)
     {
-        var builtRows = orders.Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes)).ToList();
+        var webocrMarketProductCodes = LoadWebocrMarketProductCodeMappings();
+        var builtRows = orders
+            .Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes))
+            .ToList();
         var optionIssueRows = builtRows.Where(row => row.HasOptionIssue).ToList();
         var blankRows = builtRows.Where(row => !row.HasOptionIssue && string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
         var normalRows = builtRows.Where(row => !row.HasOptionIssue && !string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
@@ -1090,10 +1241,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         Cafe24Order order,
         string marketName,
         string orderDateText,
-        IReadOnlyDictionary<string, string>? manualProductCodes)
+        IReadOnlyDictionary<string, string>? manualProductCodes,
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
     {
         if (MarketplaceSourceKey.IsCoupang(order.MallId))
-            return BuildCoupangRow(order, marketName, orderDateText, manualProductCodes);
+            return BuildCoupangRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes);
 
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = SelectReceiver(orderJson, order);
@@ -1101,7 +1253,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
         var supplierProductName = ResolveSupplierProductName(item, order);
         var optionText = ResolveOptionText(item);
-        var baseProductCode = ResolveBaseProductCode(item, order);
+        var baseProductCode = ResolveBaseProductCode(item, order, webocrMarketProductCodes);
         var optionLetter = ResolveOptionLetter(optionText);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionLetter);
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
@@ -1119,6 +1271,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
+            BaseProductCode = baseProductCode,
             ProductCode = finalProductCode,
             OptionIssue = optionLetter.IssueReason,
             MarketName = marketName,
@@ -1137,7 +1290,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
         Cafe24Order order,
         string marketName,
         string orderDateText,
-        IReadOnlyDictionary<string, string>? manualProductCodes)
+        IReadOnlyDictionary<string, string>? manualProductCodes,
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
     {
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = orderJson?["receiver"] as JObject;
@@ -1149,11 +1303,26 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var supplierProductName = item?["sellerProductName"]?.ToString()
                                    ?? item?["vendorItemName"]?.ToString()
                                    ?? order.ProductName;
-        var baseProductCode = ResolveCoupangProductCode(item, order);
+        var exactSkuProductCode = ResolveExactCoupangSkuProductCode(item);
+        var baseProductCode = string.IsNullOrWhiteSpace(exactSkuProductCode)
+            ? ResolveCoupangProductCode(item, order, webocrMarketProductCodes)
+            : exactSkuProductCode;
         var optionLetter = ResolveOptionLetter(optionText);
-        var finalProductCode = ApplyOptionLetter(baseProductCode, optionLetter);
+        var finalProductCode = string.IsNullOrWhiteSpace(exactSkuProductCode)
+            ? ApplyOptionLetter(baseProductCode, optionLetter)
+            : exactSkuProductCode;
+        var optionIssue = string.IsNullOrWhiteSpace(exactSkuProductCode) ? optionLetter.IssueReason : string.Empty;
+        if (!string.IsNullOrWhiteSpace(exactSkuProductCode) && !optionLetter.HasIssue)
+        {
+            var skuLetter = exactSkuProductCode[^1].ToString().ToUpperInvariant();
+            if (!string.Equals(skuLetter, optionLetter.Letter, StringComparison.OrdinalIgnoreCase))
+            {
+                finalProductCode = string.Empty;
+                optionIssue = OptionIssueCodeMismatch;
+            }
+        }
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
-        if (!optionLetter.HasIssue)
+        if (string.IsNullOrWhiteSpace(optionIssue))
             finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
 
         var detailAddress = receiver?["addr2"]?.ToString() ?? string.Empty;
@@ -1171,8 +1340,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
+            BaseProductCode = baseProductCode,
             ProductCode = finalProductCode,
-            OptionIssue = optionLetter.IssueReason,
+            OptionIssue = optionIssue,
             MarketName = marketName,
             ExportDate = orderDateText,
             Quantity = order.Quantity,
@@ -1200,11 +1370,15 @@ internal static class ShipmentRequestOrderExportFormatterEx
             ?? items.OfType<JObject>().FirstOrDefault();
     }
 
-    private static string ResolveCoupangProductCode(JObject? item, Cafe24Order order)
+    private static string ResolveCoupangProductCode(
+        JObject? item,
+        Cafe24Order order,
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
     {
         foreach (var candidate in new[]
         {
             item?["externalVendorSkuCode"]?.ToString(),
+            item?["externalVendorSku"]?.ToString(),
             item?["sellerProductItemName"]?.ToString(),
             item?["sellerProductName"]?.ToString(),
             item?["vendorItemName"]?.ToString(),
@@ -1216,8 +1390,29 @@ internal static class ShipmentRequestOrderExportFormatterEx
                 return extracted;
         }
 
+        var mapped = ResolveWebocrMarketProductCode("쿠팡", item, order, webocrMarketProductCodes);
+        if (!string.IsNullOrWhiteSpace(mapped))
+            return mapped;
+
         return string.Empty;
     }
+
+    private static string ResolveExactCoupangSkuProductCode(JObject? item)
+    {
+        foreach (var candidate in new[]
+        {
+            item?["externalVendorSkuCode"]?.ToString(),
+            item?["externalVendorSku"]?.ToString(),
+        })
+        {
+            var extracted = ExtractProductCode(candidate);
+            if (!string.IsNullOrWhiteSpace(extracted))
+                return extracted;
+        }
+
+        return string.Empty;
+    }
+
 
     private static string ResolveCoupangRecipientPhone(JObject? receiver, Cafe24Order order)
     {
@@ -1308,7 +1503,10 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return string.Empty;
     }
 
-    private static string ResolveBaseProductCode(JObject? item, Cafe24Order order)
+    private static string ResolveBaseProductCode(
+        JObject? item,
+        Cafe24Order order,
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
     {
         var customProductCode = item?["custom_product_code"]?.ToString();
         if (!string.IsNullOrWhiteSpace(customProductCode))
@@ -1326,6 +1524,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
                 return extracted;
         }
 
+        var marketHint = string.IsNullOrWhiteSpace(order.MarketName) ? order.MallId : order.MarketName;
+        var mapped = ResolveWebocrMarketProductCode(marketHint, item, order, webocrMarketProductCodes);
+        if (!string.IsNullOrWhiteSpace(mapped))
+            return mapped;
+
         return string.Empty;
     }
 
@@ -1334,6 +1537,211 @@ internal static class ShipmentRequestOrderExportFormatterEx
         if (string.IsNullOrWhiteSpace(text)) return string.Empty;
         var match = ProductCodeRegex.Match(text);
         return match.Success ? match.Groups[1].Value.ToUpperInvariant() : string.Empty;
+    }
+
+    private static string ResolveWebocrMarketProductCode(
+        string? marketHint,
+        JObject? item,
+        Cafe24Order order,
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
+    {
+        if (webocrMarketProductCodes == null || webocrMarketProductCodes.Count == 0)
+            return string.Empty;
+
+        var marketKey = NormalizeWebocrMarketKey(marketHint);
+        foreach (var id in new[]
+        {
+            item?["sellerProductId"]?.ToString(),
+            item?["productId"]?.ToString(),
+            item?["originProductNo"]?.ToString(),
+            item?["channelProductNo"]?.ToString(),
+            item?["product_no"]?.ToString(),
+            item?["productNo"]?.ToString(),
+            item?["market_product_no"]?.ToString(),
+            item?["marketProductNo"]?.ToString(),
+            item?["shop_product_no"]?.ToString(),
+            item?["shopProductNo"]?.ToString(),
+            item?["spdNo"]?.ToString(),
+            item?["sellerProductItemId"]?.ToString(),
+            item?["vendorItemId"]?.ToString(),
+            order.OrderItemCode,
+            order.ShippingCode,
+        })
+        {
+            if (TryGetWebocrMapping(webocrMarketProductCodes, marketKey, "id", id, out var productCode))
+                return productCode;
+        }
+
+        foreach (var name in new[]
+        {
+            item?["supplier_product_name"]?.ToString(),
+            item?["product_name"]?.ToString(),
+            item?["sellerProductName"]?.ToString(),
+            item?["vendorItemName"]?.ToString(),
+            order.ProductName,
+        })
+        {
+            var normalizedName = NormalizeWebocrProductName(name);
+            if (TryGetWebocrMapping(webocrMarketProductCodes, marketKey, "name", normalizedName, out var productCode))
+                return productCode;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryGetWebocrMapping(
+        IReadOnlyDictionary<string, string> mappings,
+        string marketKey,
+        string kind,
+        string? value,
+        out string productCode)
+    {
+        productCode = string.Empty;
+        var normalizedValue = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedValue))
+            return false;
+
+        foreach (var key in new[]
+        {
+            BuildWebocrMappingKey(marketKey, kind, normalizedValue),
+            BuildWebocrMappingKey("*", kind, normalizedValue),
+        })
+        {
+            if (mappings.TryGetValue(key, out var mapped) && !string.IsNullOrWhiteSpace(mapped))
+            {
+                productCode = mapped.Trim().ToUpperInvariant();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IReadOnlyDictionary<string, string> LoadWebocrMarketProductCodeMappings()
+    {
+        var path = ResolveWebocrMarketUploadStatePath();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var root = JObject.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var nameCandidates = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var property in root.Properties())
+            {
+                var gsCode = ExtractProductCode(property.Name);
+                if (string.IsNullOrWhiteSpace(gsCode) || property.Value is not JObject entry)
+                    continue;
+
+                var productName = entry["ProductName"]?.ToString() ?? entry["productName"]?.ToString() ?? "";
+                var markets = entry["Markets"] as JObject ?? entry["markets"] as JObject;
+                if (markets == null)
+                    continue;
+
+                foreach (var marketProperty in markets.Properties())
+                {
+                    if (marketProperty.Value is not JObject state)
+                        continue;
+
+                    var status = (state["Status"]?.ToString() ?? state["status"]?.ToString() ?? "").Trim();
+                    if (!IsSuccessfulWebocrUploadStatus(status))
+                        continue;
+
+                    var marketKey = NormalizeWebocrMarketKey(marketProperty.Name);
+                    var productId = state["ProductId"]?.ToString() ?? state["productId"]?.ToString() ?? "";
+                    AddWebocrMapping(mappings, marketKey, "id", productId, gsCode);
+                    AddWebocrMapping(mappings, "*", "id", productId, gsCode);
+
+                    var normalizedName = NormalizeWebocrProductName(productName);
+                    if (!string.IsNullOrWhiteSpace(normalizedName))
+                    {
+                        AddNameCandidate(nameCandidates, BuildWebocrMappingKey(marketKey, "name", normalizedName), gsCode);
+                        AddNameCandidate(nameCandidates, BuildWebocrMappingKey("*", "name", normalizedName), gsCode);
+                    }
+                }
+            }
+
+            foreach (var pair in nameCandidates)
+            {
+                if (pair.Value.Count == 1)
+                    mappings[pair.Key] = pair.Value.First();
+            }
+
+            return mappings;
+        }
+        catch
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static string ResolveWebocrMarketUploadStatePath()
+    {
+        var keyRoot = Environment.GetEnvironmentVariable("KEYWORDOCR_KEY_DIR");
+        if (string.IsNullOrWhiteSpace(keyRoot))
+            keyRoot = Environment.GetEnvironmentVariable("WEBOCR_KEY_ROOT");
+        if (string.IsNullOrWhiteSpace(keyRoot))
+            keyRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Desktop", "key");
+        return Path.Combine(keyRoot, "market_upload_state.json");
+    }
+
+    private static bool IsSuccessfulWebocrUploadStatus(string status)
+        => status.Equals("OK", StringComparison.OrdinalIgnoreCase)
+           || status.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase)
+           || status.Equals("SKIP_DUP", StringComparison.OrdinalIgnoreCase);
+
+    private static void AddWebocrMapping(
+        Dictionary<string, string> mappings,
+        string marketKey,
+        string kind,
+        string? rawValue,
+        string gsCode)
+    {
+        var value = (rawValue ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(value) || string.IsNullOrWhiteSpace(gsCode))
+            return;
+        mappings.TryAdd(BuildWebocrMappingKey(marketKey, kind, value), gsCode.Trim().ToUpperInvariant());
+    }
+
+    private static void AddNameCandidate(Dictionary<string, HashSet<string>> candidates, string key, string gsCode)
+    {
+        if (!candidates.TryGetValue(key, out var values))
+        {
+            values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            candidates[key] = values;
+        }
+        values.Add(gsCode.Trim().ToUpperInvariant());
+    }
+
+    private static string BuildWebocrMappingKey(string marketKey, string kind, string value)
+        => $"{NormalizeWebocrMarketKey(marketKey)}|{kind}|{value.Trim().ToUpperInvariant()}";
+
+    private static string NormalizeWebocrProductName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+        var withoutGs = ProductCodeRegex.Replace(value, " ");
+        return Regex.Replace(withoutGs, "\\s+", " ").Trim().ToUpperInvariant();
+    }
+
+    private static string NormalizeWebocrMarketKey(string? value)
+    {
+        var text = (value ?? "").Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(text) || text == "*")
+            return "*";
+        if (text.Contains("쿠팡") || text.Contains("COUPANG"))
+            return "COUPANG";
+        if (text.Contains("네이버") || text.Contains("NAVER") || text.Contains("스마트스토어"))
+            return "NAVER";
+        if (text.Contains("롯데") || text.Contains("LOTTE"))
+            return "LOTTEON";
+        if (text.Contains("11번가") || text.Contains("11ST") || text.Contains("ELEVEN"))
+            return "11ST";
+        if (text.Contains("ESM") || text.Contains("G마켓") || text.Contains("GMARKET") || text.Contains("옥션") || text.Contains("AUCTION"))
+            return "ESM";
+        return text;
     }
 
     public static string BuildProductMappingKey(string? supplierProductName, string? optionText)
@@ -1556,6 +1964,13 @@ internal sealed class OrderExportProductCodeMappingDialogEx : Form
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
+            Name = "BaseProductCode",
+            HeaderText = "기본코드",
+            ReadOnly = true,
+            Width = 130
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
             Name = "ProductCode",
             HeaderText = "상품코드 입력",
             Width = 180
@@ -1563,7 +1978,7 @@ internal sealed class OrderExportProductCodeMappingDialogEx : Form
 
         foreach (var row in rows)
         {
-            var index = _grid.Rows.Add(row.SupplierProductName, row.ProductOption, "");
+            var index = _grid.Rows.Add(row.SupplierProductName, row.ProductOption, row.BaseProductCode, "");
             _grid.Rows[index].Tag = row.ProductMatchKey;
         }
 
