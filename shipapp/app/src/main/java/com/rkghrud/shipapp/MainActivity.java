@@ -92,6 +92,7 @@ import com.rkghrud.shipapp.data.GoogleSheetsAuthStore;
 import com.rkghrud.shipapp.data.GoogleSheetsTrackingMatcher;
 
 import com.rkghrud.shipapp.data.LiveShipmentRepository;
+import com.rkghrud.shipapp.data.LocalStandbyMatchStore;
 
 import com.rkghrud.shipapp.data.TrackingSpreadsheetImporter;
 
@@ -194,6 +195,7 @@ public class MainActivity extends AppCompatActivity {
     private CredentialStore credentialStore;
 
     private LiveShipmentRepository repository;
+    private LocalStandbyMatchStore localStandbyMatchStore;
 
     private DispatchOrderAdapter adapter;
 
@@ -241,6 +243,10 @@ public class MainActivity extends AppCompatActivity {
     private MaterialButton importSpreadsheetButton;
 
     private MaterialButton standbyPageButton;
+
+    private MaterialButton pendingCheckButton;
+
+    private MaterialButton stockCheckButton;
 
     private MaterialButton uploadSelectedButton;
 
@@ -334,6 +340,7 @@ public class MainActivity extends AppCompatActivity {
         credentialStore = new CredentialStore(this);
 
         repository = new LiveShipmentRepository(this);
+        localStandbyMatchStore = new LocalStandbyMatchStore(this);
 
         executorService = Executors.newSingleThreadExecutor();
 
@@ -381,6 +388,10 @@ public class MainActivity extends AppCompatActivity {
         importSpreadsheetButton = findViewById(R.id.btnImportSpreadsheet);
 
         standbyPageButton = findViewById(R.id.btnOpenStandbyPage);
+
+        pendingCheckButton = findViewById(R.id.btnPendingCheck);
+
+        stockCheckButton = findViewById(R.id.btnStockCheck);
 
         uploadSelectedButton = findViewById(R.id.btnUploadSelected);
 
@@ -481,6 +492,10 @@ public class MainActivity extends AppCompatActivity {
 
         standbyPageButton.setOnClickListener(v -> confirmStandbySelected());
 
+        pendingCheckButton.setOnClickListener(v -> checkPendingShipmentSelected());
+
+        stockCheckButton.setOnClickListener(v -> checkStockSelected());
+
         uploadSelectedButton.setOnClickListener(v -> confirmUploadSelected());
 
         swipeRefreshLayout.setOnRefreshListener(this::refreshOrders);
@@ -575,6 +590,7 @@ public class MainActivity extends AppCompatActivity {
             }
             try {
                 List<DispatchOrder> coupangOrders = repository.fetchOrdersForDispatch(COUPANG_KEY, startDate, endDate);
+                int appliedStandbyCount = localStandbyMatchStore.applyToOrders(coupangOrders);
                 result.orders.addAll(coupangOrders);
                 for (CoupangCredentials credentials : coupangCredentials) {
                     int count = 0;
@@ -585,7 +601,8 @@ public class MainActivity extends AppCompatActivity {
                     }
                     marketCountLabels.put(credentials.getMarketName(), String.valueOf(count));
                 }
-                result.coupangStatus = "쿠팡 " + coupangCredentials.size() + "개\n조회 성공 " + coupangOrders.size() + "건";
+                result.coupangStatus = "쿠팡 " + coupangCredentials.size() + "개\n조회 성공 " + coupangOrders.size() + "건"
+                        + (appliedStandbyCount > 0 ? "\n앱 대기 " + appliedStandbyCount + "건" : "");
                 result.fetchedCount++;
             } catch (Exception ex) {
                 for (CoupangCredentials credentials : coupangCredentials) {
@@ -1302,6 +1319,10 @@ public class MainActivity extends AppCompatActivity {
         importSpreadsheetButton.setEnabled(!swipeRefreshLayout.isRefreshing() && !allOrders.isEmpty());
         standbyPageButton.setText(readyCount > 0 ? "대기매칭 " + readyCount + "건" : "대기매칭");
         standbyPageButton.setEnabled(!swipeRefreshLayout.isRefreshing() && readyCount > 0);
+        pendingCheckButton.setText(readyCount > 0 ? "미출고 " + readyCount + "건" : "미출고");
+        pendingCheckButton.setEnabled(!swipeRefreshLayout.isRefreshing() && readyCount > 0);
+        stockCheckButton.setText(readyCount > 0 ? "재고 " + readyCount + "건" : "재고");
+        stockCheckButton.setEnabled(!swipeRefreshLayout.isRefreshing() && readyCount > 0);
     }
 
 
@@ -1414,10 +1435,11 @@ public class MainActivity extends AppCompatActivity {
             try {
                 GoogleSheetsTrackingMatcher.MatchResult result =
                         GoogleSheetsTrackingMatcher.applyToOrders(this, targetOrders);
+                int standbyApplied = localStandbyMatchStore.applyToOrders(targetOrders);
                 runOnUiThread(() -> {
                     setLoading(false);
                     applyFilters();
-                    showToast(result.summary());
+                    showToast(result.summary() + (standbyApplied > 0 ? ", 앱대기 " + standbyApplied + "건" : ""));
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
@@ -1446,10 +1468,11 @@ public class MainActivity extends AppCompatActivity {
             try {
                 TrackingSpreadsheetImporter.MatchResult result =
                         TrackingSpreadsheetImporter.applyToOrders(this, uri, targetOrders);
+                int standbyApplied = localStandbyMatchStore.applyToOrders(targetOrders);
                 runOnUiThread(() -> {
                     setLoading(false);
                     applyFilters();
-                    showToast(result.summary());
+                    showToast(result.summary() + (standbyApplied > 0 ? ", 앱대기 " + standbyApplied + "건" : ""));
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
@@ -1480,7 +1503,7 @@ public class MainActivity extends AppCompatActivity {
 
                 .setTitle("대기매칭")
 
-                .setMessage(targets.size() + "건을 Cafe24 송장대기 상태로 등록합니다. 계속하시겠습니까?")
+                .setMessage(buildStandbyConfirmMessage(targets))
 
                 .setNegativeButton("취소", null)
 
@@ -1520,6 +1543,134 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private void checkPendingShipmentSelected() {
+
+        List<DispatchOrder> targets = getReadyOrders();
+
+        if (targets.isEmpty()) {
+
+            showToast("체크된 주문 중 미출고 확인 가능한 항목이 없습니다.");
+
+            return;
+
+        }
+
+        setLoading(true);
+
+        executorService.execute(() -> {
+
+            try {
+
+                GoogleSheetsTrackingMatcher.PendingCheckResult result =
+                        GoogleSheetsTrackingMatcher.checkPendingShipments(this, targets);
+                localStandbyMatchStore.applyToOrders(targets);
+
+                runOnUiThread(() -> {
+
+                    setLoading(false);
+                    applyFilters();
+                    showToast(result.summary());
+
+                });
+
+            } catch (Exception ex) {
+
+                runOnUiThread(() -> {
+
+                    setLoading(false);
+                    showToast("미출고 체크 실패: " + ex.getMessage());
+
+                });
+
+            }
+
+        });
+
+    }
+
+    private void checkStockSelected() {
+
+        List<DispatchOrder> targets = getReadyOrders();
+
+        if (targets.isEmpty()) {
+
+            showToast("체크된 주문 중 재고 확인 가능한 항목이 없습니다.");
+
+            return;
+
+        }
+
+        setLoading(true);
+
+        executorService.execute(() -> {
+
+            try {
+
+                GoogleSheetsTrackingMatcher.StockCheckResult result =
+                        GoogleSheetsTrackingMatcher.checkStock(this, targets);
+
+                runOnUiThread(() -> {
+
+                    setLoading(false);
+                    applyFilters();
+                    showStockCheckDialog(result);
+
+                });
+
+            } catch (Exception ex) {
+
+                runOnUiThread(() -> {
+
+                    setLoading(false);
+                    showToast("재고 확인 실패: " + ex.getMessage());
+
+                });
+
+            }
+
+        });
+
+    }
+
+    private void showStockCheckDialog(GoogleSheetsTrackingMatcher.StockCheckResult result) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(result.summary()).append("\n\n");
+        builder.append("상품명 | 발주 | 전체 | 실재고 | 상태\n");
+        for (GoogleSheetsTrackingMatcher.StockRow row : result.rows) {
+            builder.append(shorten(row.productName, 14))
+                    .append(" | ")
+                    .append(row.orderQuantity)
+                    .append(" | ")
+                    .append(row.totalOrderQuantity)
+                    .append(" | ")
+                    .append(row.stockQuantityText.isEmpty() ? "-" : row.stockQuantityText)
+                    .append(" | ")
+                    .append(row.status)
+                    .append("\n");
+        }
+
+        TextView messageView = new TextView(this);
+        int padding = (int) (16 * getResources().getDisplayMetrics().density);
+        messageView.setPadding(padding, padding, padding, 0);
+        messageView.setText(builder.toString().trim());
+        messageView.setTextSize(12);
+        messageView.setTypeface(Typeface.MONOSPACE);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("재고 확인")
+                .setView(messageView)
+                .setPositiveButton("확인", null)
+                .show();
+    }
+
+    private String shorten(String value, int maxLength) {
+        String text = safeText(value);
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, Math.max(0, maxLength - 3)) + "...";
+    }
+
 
 
     private List<DispatchOrder> getReadyOrders() {
@@ -1540,6 +1691,29 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private String buildStandbyConfirmMessage(List<DispatchOrder> targets) {
+        int coupangCount = countCoupangOrders(targets);
+        int cafe24Count = targets.size() - coupangCount;
+        if (coupangCount > 0 && cafe24Count == 0) {
+            return coupangCount + "건을 앱 내부 대기목록에 저장합니다. 쿠팡 API에는 아직 업로드하지 않습니다.";
+        }
+        if (coupangCount > 0) {
+            return "쿠팡 " + coupangCount + "건은 앱 내부 대기목록에 저장하고, Cafe24 "
+                    + cafe24Count + "건은 송장대기 상태로 등록합니다. 계속하시겠습니까?";
+        }
+        return cafe24Count + "건을 Cafe24 송장대기 상태로 등록합니다. 계속하시겠습니까?";
+    }
+
+    private int countCoupangOrders(List<DispatchOrder> orders) {
+        int count = 0;
+        for (DispatchOrder order : orders) {
+            if ("coupang".equals(order.marketKey)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
 
 
     private void uploadSelectedOrders(List<DispatchOrder> targets) {
@@ -1551,6 +1725,7 @@ public class MainActivity extends AppCompatActivity {
             List<String> success = new ArrayList<>();
 
             List<String> failed = new ArrayList<>();
+            List<DispatchOrder> successfulUploads = new ArrayList<>();
 
 
 
@@ -1567,6 +1742,7 @@ public class MainActivity extends AppCompatActivity {
                 if (errorMessage == null || errorMessage.trim().isEmpty()) {
 
                     success.add(label);
+                    successfulUploads.add(order);
 
                 } else {
 
@@ -1576,13 +1752,15 @@ public class MainActivity extends AppCompatActivity {
 
             }
 
+            localStandbyMatchStore.removeCoupangMatches(successfulUploads);
+
 
 
             runOnUiThread(() -> {
 
                 setLoading(false);
 
-                showUploadResultDialog(success, failed);
+                showActionResultDialog("업로드 결과", success, failed);
 
             });
 
@@ -1592,7 +1770,7 @@ public class MainActivity extends AppCompatActivity {
 
 
 
-    private void showUploadResultDialog(List<String> success, List<String> failed) {
+    private void showActionResultDialog(String title, List<String> success, List<String> failed) {
 
         StringBuilder builder = new StringBuilder();
 
@@ -1630,7 +1808,7 @@ public class MainActivity extends AppCompatActivity {
 
         new MaterialAlertDialogBuilder(this)
 
-                .setTitle("업로드 결과")
+                .setTitle(title)
 
                 .setMessage(builder.toString().trim())
 
@@ -1836,13 +2014,18 @@ public class MainActivity extends AppCompatActivity {
 
             for (DispatchOrder order : targets) {
 
-                String errorMessage = repository.pushTrackingStandby(order, order.shippingCode());
-
                 String label = order.shortMarketLabel() + " / "
 
                         + safeText(order.recipientName) + " / "
 
                         + safeText(order.trackingNumber);
+
+                if ("coupang".equals(order.marketKey)) {
+                    success.add(label + "\n  → 앱 내부 대기목록 저장");
+                    continue;
+                }
+
+                String errorMessage = repository.pushTrackingStandby(order, order.shippingCode());
 
                 if (errorMessage == null || errorMessage.trim().isEmpty()) {
 
@@ -1856,13 +2039,15 @@ public class MainActivity extends AppCompatActivity {
 
             }
 
+            localStandbyMatchStore.saveCoupangMatches(targets);
+
 
 
             runOnUiThread(() -> {
 
                 setLoading(false);
 
-                showUploadResultDialog(success, failed);
+                showActionResultDialog("대기매칭 결과", success, failed);
 
             });
 
@@ -3331,6 +3516,10 @@ public class MainActivity extends AppCompatActivity {
         importSpreadsheetButton.setEnabled(!loading && !allOrders.isEmpty());
 
         standbyPageButton.setEnabled(!loading && countReadyOrders() > 0);
+
+        pendingCheckButton.setEnabled(!loading && countReadyOrders() > 0);
+
+        stockCheckButton.setEnabled(!loading && countReadyOrders() > 0);
 
         selectAllCheckBox.setEnabled(!loading && !displayedOrders.isEmpty());
 

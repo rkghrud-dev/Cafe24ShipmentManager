@@ -42,6 +42,7 @@ public final class GoogleSheetsTrackingMatcher {
     private static final String SHEET_NAME = BuildConfig.GOOGLE_SHEETS_SHEET_NAME;
     private static final String LIVE_TRACKING_SHEET_NAME = "CJ발주서";
     private static final String LIVE_PENDING_SHEET_NAME = "미출고정보";
+    private static final String PRODUCT_INFO_SHEET_NAME = "상품정보";
     private static final String CLIENT_ID = BuildConfig.GOOGLE_SHEETS_CLIENT_ID;
     private static final String CLIENT_SECRET = BuildConfig.GOOGLE_SHEETS_CLIENT_SECRET;
     private static final String REFRESH_TOKEN = BuildConfig.GOOGLE_SHEETS_REFRESH_TOKEN;
@@ -52,6 +53,7 @@ public final class GoogleSheetsTrackingMatcher {
     private static final long SERVICE_ACCOUNT_TOKEN_TTL_SECONDS = 55L * 60L;
     private static final String CJ_SHIPPING_COMPANY = "CJ대한통운";
     private static final int DEFAULT_VENDOR_COLUMN_INDEX = 2;
+    private static final int DEFAULT_PRODUCT_CODE_COLUMN_INDEX = 1;
     private static final int DEFAULT_RECIPIENT_NAME_COLUMN_INDEX = 5;
     private static final int DEFAULT_PHONE_COLUMN_INDEX = 6;
     private static final int DEFAULT_TRACKING_COLUMN_INDEX = 11;
@@ -78,6 +80,10 @@ public final class GoogleSheetsTrackingMatcher {
 
     private static final String[] SHIPPING_COMPANY_KEYWORDS = {
             "택배사", "배송사", "운송사", "택배", "배송업체", "운송업체"
+    };
+
+    private static final String[] QUANTITY_KEYWORDS = {
+            "수량", "발주수량", "주문수량", "출고수량", "내품수량", "Qty", "Quantity"
     };
 
     private static String cachedAccessToken = "";
@@ -112,6 +118,48 @@ public final class GoogleSheetsTrackingMatcher {
         }
     }
 
+    public static PendingCheckResult checkPendingShipments(Context context, List<DispatchOrder> orders) throws Exception {
+        if (orders == null || orders.isEmpty()) {
+            return new PendingCheckResult(buildPendingCheckSourceName(orders), 0, 0, 0, "");
+        }
+        String accessToken = getAccessToken(context);
+        try {
+            return checkPendingShipmentsWithToken(accessToken, orders);
+        } catch (Exception ex) {
+            String message = ex.getMessage() == null ? "" : ex.getMessage();
+            if (message.contains("401") || message.contains("인증 실패")) {
+                invalidateAccessToken();
+                if (context != null) {
+                    new GoogleSheetsAuthStore(context).invalidateAccessToken();
+                }
+                accessToken = getAccessToken(context);
+                return checkPendingShipmentsWithToken(accessToken, orders);
+            }
+            throw ex;
+        }
+    }
+
+    public static StockCheckResult checkStock(Context context, List<DispatchOrder> orders) throws Exception {
+        if (orders == null || orders.isEmpty()) {
+            return new StockCheckResult(0, 0, 0, Collections.emptyList());
+        }
+        String accessToken = getAccessToken(context);
+        try {
+            return checkStockWithToken(accessToken, orders);
+        } catch (Exception ex) {
+            String message = ex.getMessage() == null ? "" : ex.getMessage();
+            if (message.contains("401") || message.contains("인증 실패")) {
+                invalidateAccessToken();
+                if (context != null) {
+                    new GoogleSheetsAuthStore(context).invalidateAccessToken();
+                }
+                accessToken = getAccessToken(context);
+                return checkStockWithToken(accessToken, orders);
+            }
+            throw ex;
+        }
+    }
+
     private static String getAccessToken(Context context) throws Exception {
         if (context != null) {
             GoogleSheetsAuthStore store = new GoogleSheetsAuthStore(context);
@@ -130,12 +178,71 @@ public final class GoogleSheetsTrackingMatcher {
         return applyRowsToOrders(combinedSheet, orders, buildLiveMatchSourceName(orders));
     }
 
+    private static PendingCheckResult checkPendingShipmentsWithToken(String accessToken, List<DispatchOrder> orders) throws Exception {
+        ParsedSheet pendingSheet = scopeParsedSheetToOrders(readLiveSheet(accessToken, LIVE_PENDING_SHEET_NAME, true), orders);
+        return applyPendingRowsToOrders(pendingSheet, orders, buildPendingCheckSourceName(orders));
+    }
+
+    private static StockCheckResult checkStockWithToken(String accessToken, List<DispatchOrder> orders) throws Exception {
+        Map<String, StockInfo> stockByCode = readProductStock(accessToken);
+        Map<String, Integer> totalByCode = new HashMap<>();
+        for (DispatchOrder order : orders) {
+            String code = normalizeProductCode(order.matchedProductCode);
+            if (code.isEmpty()) {
+                continue;
+            }
+            int qty = order.matchedOrderQuantity > 0 ? order.matchedOrderQuantity : Math.max(1, order.quantity);
+            totalByCode.put(code, totalByCode.getOrDefault(code, 0) + qty);
+        }
+
+        List<StockRow> rows = new ArrayList<>();
+        int matchedCount = 0;
+        int shortageCount = 0;
+        for (DispatchOrder order : orders) {
+            String code = normalizeProductCode(order.matchedProductCode);
+            int qty = order.matchedOrderQuantity > 0 ? order.matchedOrderQuantity : Math.max(1, order.quantity);
+            int totalQty = code.isEmpty() ? 0 : totalByCode.getOrDefault(code, 0);
+            order.matchedTotalOrderQuantity = totalQty;
+            order.stockQuantityText = "";
+            order.stockShortage = false;
+
+            if (code.isEmpty()) {
+                rows.add(new StockRow(order.productName, "", qty, totalQty, "", false, "상품코드 없음"));
+                continue;
+            }
+
+            StockInfo stock = stockByCode.get(code);
+            if (stock == null) {
+                rows.add(new StockRow(order.productName, code, qty, totalQty, "", false, "재고 없음"));
+                continue;
+            }
+
+            matchedCount++;
+            order.stockQuantityText = stock.displayText;
+            order.stockShortage = stock.quantity - totalQty <= 0;
+            if (order.stockShortage) {
+                shortageCount++;
+            }
+            rows.add(new StockRow(
+                    order.productName,
+                    code,
+                    qty,
+                    totalQty,
+                    stock.displayText,
+                    order.stockShortage,
+                    order.stockShortage ? "부족" : "가능"
+            ));
+        }
+        return new StockCheckResult(orders.size(), matchedCount, shortageCount, rows);
+    }
+
     private static ParsedSheet readLiveSheet(String accessToken, String sheetName, boolean pendingShipment) throws Exception {
         List<List<String>> rows = readSheetRows(accessToken, sheetName);
         int headerRowIndex = detectHeaderRow(rows);
         List<String> headersRow = rows.get(headerRowIndex);
         int phoneColumnIndex = detectPhoneColumn(headersRow);
         int trackingColumnIndex = detectTrackingColumn(headersRow);
+        int quantityColumnIndex = detectQuantityColumn(headersRow);
         PendingWindow pendingWindow = pendingShipment
                 ? detectPendingWindow(rows, headerRowIndex)
                 : PendingWindow.NONE;
@@ -155,6 +262,8 @@ public final class GoogleSheetsTrackingMatcher {
             String recipientPhone = phoneColumnIndex >= 0 ? getCell(row, phoneColumnIndex) : getCell(row, DEFAULT_PHONE_COLUMN_INDEX);
             String normalizedPhone = PhoneNormalizer.normalize(recipientPhone);
             String recipientName = getCell(row, DEFAULT_RECIPIENT_NAME_COLUMN_INDEX);
+            String productCode = normalizeProductCode(getCell(row, DEFAULT_PRODUCT_CODE_COLUMN_INDEX));
+            int orderQuantity = parseInt(quantityColumnIndex >= 0 ? getCell(row, quantityColumnIndex) : "");
             String trackingNumber = pendingShipment ? "" : normalizeTracking(getCell(row, trackingColumnIndex));
             if (!trackingNumber.isEmpty()) {
                 trackingRowCount++;
@@ -168,7 +277,9 @@ public final class GoogleSheetsTrackingMatcher {
                     normalizedPhone,
                     recipientName,
                     pendingShipment ? "" : CJ_SHIPPING_COMPANY,
-                    pendingShipment
+                    pendingShipment,
+                    productCode,
+                    orderQuantity
             ));
         }
 
@@ -206,6 +317,36 @@ public final class GoogleSheetsTrackingMatcher {
         return headers.size() > DEFAULT_TRACKING_COLUMN_INDEX ? DEFAULT_TRACKING_COLUMN_INDEX : -1;
     }
 
+    private static int detectQuantityColumn(List<String> headers) {
+        for (int index = 0; index < headers.size(); index++) {
+            String normalized = normalizeHeader(headers.get(index));
+            for (String keyword : QUANTITY_KEYWORDS) {
+                if (normalized.contains(normalizeHeader(keyword))) {
+                    return index;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static Map<String, StockInfo> readProductStock(String accessToken) throws Exception {
+        List<List<String>> rows = readSheetRows(accessToken, PRODUCT_INFO_SHEET_NAME);
+        Map<String, StockInfo> stockByCode = new HashMap<>();
+        for (List<String> row : rows) {
+            String code = normalizeProductCode(getCell(row, 0));
+            if (code.isEmpty()) {
+                continue;
+            }
+            String stockText = getCell(row, 3);
+            Double quantity = parseDouble(stockText);
+            if (quantity == null) {
+                continue;
+            }
+            stockByCode.put(code, new StockInfo(stockText, quantity));
+        }
+        return stockByCode;
+    }
+
     private static ParsedSheet mergeParsedSheets(ParsedSheet trackingSheet, ParsedSheet pendingSheet) {
         List<SheetRow> mergedRows = new ArrayList<>();
         int sheetRowCount = 0;
@@ -229,6 +370,38 @@ public final class GoogleSheetsTrackingMatcher {
 
     static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
         return applyRowsToOrders(parsedSheet, orders, buildMatchSourceName(parsedSheet, orders));
+    }
+
+    static PendingCheckResult applyPendingRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
+        return applyPendingRowsToOrders(parsedSheet, orders, buildPendingCheckSourceName(orders));
+    }
+
+    private static PendingCheckResult applyPendingRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders, String sourceName) {
+        Map<String, List<SheetRow>> pendingPhoneIndex = buildPhoneIndex(parsedSheet.rows, true);
+        int checkedCount = 0;
+        int blockedCount = 0;
+        int candidateCount = 0;
+
+        for (DispatchOrder order : orders) {
+            checkedCount++;
+            order.clearPendingShipmentFlag();
+
+            OrderMatchResolution pendingResolution = resolvePendingMatch(order, pendingPhoneIndex);
+            if (pendingResolution.state == MatchState.PENDING_NO_TRACKING) {
+                order.markPendingShipment("미출고 확인 필요", pendingResolution.matchedRow.rowIndex);
+                blockedCount++;
+            } else if (pendingResolution.state == MatchState.CANDIDATE) {
+                candidateCount++;
+            }
+        }
+
+        return new PendingCheckResult(
+                sourceName,
+                checkedCount,
+                blockedCount,
+                candidateCount,
+                parsedSheet.pendingWindow.summaryLabel()
+        );
     }
 
     private static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders, String sourceName) {
@@ -301,6 +474,8 @@ public final class GoogleSheetsTrackingMatcher {
 
     private static void applyMatchedTracking(DispatchOrder order, SheetRow matchedRow, boolean selectForUpload) {
         order.trackingNumber = matchedRow.trackingNumber;
+        order.matchedProductCode = matchedRow.productCode;
+        order.matchedOrderQuantity = matchedRow.orderQuantity;
         if (!matchedRow.shippingCompany.isEmpty()) {
             order.shippingCompanyName = matchedRow.shippingCompany;
         }
@@ -433,6 +608,15 @@ public final class GoogleSheetsTrackingMatcher {
     private static String buildLiveMatchSourceName(List<DispatchOrder> orders) {
         String label = buildOrderScopeLabel(orders);
         String baseLabel = "구글시트 " + LIVE_TRACKING_SHEET_NAME + " + " + LIVE_PENDING_SHEET_NAME;
+        if (label.isEmpty()) {
+            return baseLabel;
+        }
+        return baseLabel + " / " + label;
+    }
+
+    private static String buildPendingCheckSourceName(List<DispatchOrder> orders) {
+        String label = buildOrderScopeLabel(orders);
+        String baseLabel = "구글시트 " + LIVE_PENDING_SHEET_NAME;
         if (label.isEmpty()) {
             return baseLabel;
         }
@@ -999,6 +1183,28 @@ public final class GoogleSheetsTrackingMatcher {
         return cleanValue(value).replaceAll("[^A-Za-z0-9]", "");
     }
 
+    private static String normalizeProductCode(String value) {
+        return cleanValue(value).toUpperCase(Locale.ROOT);
+    }
+
+    private static int parseInt(String value) {
+        Double parsed = parseDouble(value);
+        return parsed == null ? 0 : Math.max(0, parsed.intValue());
+    }
+
+    private static Double parseDouble(String value) {
+        String cleaned = cleanValue(value).replace(",", "");
+        String numeric = cleaned.replaceAll("[^0-9.\\-]", "");
+        if (numeric.isEmpty() || "-".equals(numeric) || ".".equals(numeric)) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(numeric);
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
     private static String cleanValue(String value) {
         return value == null ? "" : value.trim();
     }
@@ -1044,6 +1250,8 @@ public final class GoogleSheetsTrackingMatcher {
         final String recipientName;
         final String shippingCompany;
         final boolean pendingShipment;
+        final String productCode;
+        final int orderQuantity;
 
         SheetRow(int rowIndex, String sourceRowKey, String vendorName, String trackingNumber,
                  String recipientPhone, String recipientName, String shippingCompany) {
@@ -1052,6 +1260,13 @@ public final class GoogleSheetsTrackingMatcher {
 
         SheetRow(int rowIndex, String sourceRowKey, String vendorName, String trackingNumber,
                  String recipientPhone, String recipientName, String shippingCompany, boolean pendingShipment) {
+            this(rowIndex, sourceRowKey, vendorName, trackingNumber, recipientPhone, recipientName,
+                    shippingCompany, pendingShipment, "", 0);
+        }
+
+        SheetRow(int rowIndex, String sourceRowKey, String vendorName, String trackingNumber,
+                 String recipientPhone, String recipientName, String shippingCompany, boolean pendingShipment,
+                 String productCode, int orderQuantity) {
             this.rowIndex = rowIndex;
             this.sourceRowKey = sourceRowKey;
             this.vendorName = vendorName;
@@ -1060,6 +1275,8 @@ public final class GoogleSheetsTrackingMatcher {
             this.recipientName = recipientName;
             this.shippingCompany = shippingCompany == null ? "" : shippingCompany.trim();
             this.pendingShipment = pendingShipment;
+            this.productCode = normalizeProductCode(productCode);
+            this.orderQuantity = orderQuantity;
         }
     }
 
@@ -1173,6 +1390,16 @@ public final class GoogleSheetsTrackingMatcher {
         }
     }
 
+    private static final class StockInfo {
+        final String displayText;
+        final double quantity;
+
+        StockInfo(String displayText, double quantity) {
+            this.displayText = cleanValue(displayText);
+            this.quantity = quantity;
+        }
+    }
+
     public static final class MatchResult {
         public final String sourceName;
         public final int sheetRowCount;
@@ -1227,6 +1454,81 @@ public final class GoogleSheetsTrackingMatcher {
                 builder.append(", 미매칭 ").append(unmatchedCount).append("건");
             }
             return builder.toString();
+        }
+    }
+
+    public static final class PendingCheckResult {
+        public final String sourceName;
+        public final int checkedCount;
+        public final int blockedCount;
+        public final int candidateCount;
+        public final String pendingWindowLabel;
+
+        PendingCheckResult(String sourceName, int checkedCount, int blockedCount, int candidateCount, String pendingWindowLabel) {
+            this.sourceName = cleanValue(sourceName);
+            this.checkedCount = checkedCount;
+            this.blockedCount = blockedCount;
+            this.candidateCount = candidateCount;
+            this.pendingWindowLabel = cleanValue(pendingWindowLabel);
+        }
+
+        public String summary() {
+            StringBuilder builder = new StringBuilder();
+            builder.append(sourceName)
+                    .append(" · 확인 ")
+                    .append(checkedCount)
+                    .append("건, 업로드 가능 ")
+                    .append(Math.max(0, checkedCount - blockedCount - candidateCount))
+                    .append("건");
+            if (blockedCount > 0) {
+                builder.append(", 미출고 ").append(blockedCount).append("건");
+                if (!pendingWindowLabel.isEmpty()) {
+                    builder.append(" (").append(pendingWindowLabel).append(")");
+                }
+            }
+            if (candidateCount > 0) {
+                builder.append(", 확인필요 ").append(candidateCount).append("건");
+            }
+            return builder.toString();
+        }
+    }
+
+    public static final class StockCheckResult {
+        public final int checkedCount;
+        public final int matchedCount;
+        public final int shortageCount;
+        public final List<StockRow> rows;
+
+        StockCheckResult(int checkedCount, int matchedCount, int shortageCount, List<StockRow> rows) {
+            this.checkedCount = checkedCount;
+            this.matchedCount = matchedCount;
+            this.shortageCount = shortageCount;
+            this.rows = rows == null ? Collections.emptyList() : Collections.unmodifiableList(rows);
+        }
+
+        public String summary() {
+            return "재고 확인 " + checkedCount + "건, 재고매칭 " + matchedCount + "건, 부족 " + shortageCount + "건";
+        }
+    }
+
+    public static final class StockRow {
+        public final String productName;
+        public final String productCode;
+        public final int orderQuantity;
+        public final int totalOrderQuantity;
+        public final String stockQuantityText;
+        public final boolean shortage;
+        public final String status;
+
+        StockRow(String productName, String productCode, int orderQuantity, int totalOrderQuantity,
+                 String stockQuantityText, boolean shortage, String status) {
+            this.productName = cleanValue(productName);
+            this.productCode = cleanValue(productCode);
+            this.orderQuantity = orderQuantity;
+            this.totalOrderQuantity = totalOrderQuantity;
+            this.stockQuantityText = cleanValue(stockQuantityText);
+            this.shortage = shortage;
+            this.status = cleanValue(status);
         }
     }
 }

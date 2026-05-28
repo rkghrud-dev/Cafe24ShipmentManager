@@ -38,6 +38,11 @@ public class DispatchOrder {
     public boolean newlyDetected = false;
     public String pendingShipmentMessage = "";
     public int pendingSheetRowIndex = -1;
+    public String matchedProductCode = "";
+    public int matchedOrderQuantity = 0;
+    public int matchedTotalOrderQuantity = 0;
+    public String stockQuantityText = "";
+    public boolean stockShortage = false;
 
     public DispatchOrder(
             String marketLabel,
@@ -259,7 +264,16 @@ public class DispatchOrder {
     public void clearTrackingMatchState() {
         trackingNumber = "";
         selected = false;
+        clearStockCheckState();
         clearPendingShipmentFlag();
+    }
+
+    public void clearStockCheckState() {
+        matchedProductCode = "";
+        matchedOrderQuantity = 0;
+        matchedTotalOrderQuantity = 0;
+        stockQuantityText = "";
+        stockShortage = false;
     }
 
     public void markPendingShipment(String message, int sheetRowIndex) {
