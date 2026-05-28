@@ -205,7 +205,7 @@ public class ShipmentDispatchActivity extends AppCompatActivity {
                 String matchSummary = "";
                 if (!orders.isEmpty()) {
                     try {
-                        GoogleSheetsTrackingMatcher.MatchResult match = GoogleSheetsTrackingMatcher.applyToOrders(orders);
+                        GoogleSheetsTrackingMatcher.MatchResult match = GoogleSheetsTrackingMatcher.applyToOrders(this, orders);
                         matchSummary = match.summary();
                     } catch (Exception matchEx) {
                         matchSummary = "구글시트 매칭 실패: " + matchEx.getMessage();

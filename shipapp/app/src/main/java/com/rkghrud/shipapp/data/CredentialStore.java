@@ -46,6 +46,10 @@ public class CredentialStore {
 
     private static final String KEY_COUPANG_SECRET_KEY = "coupang_secret_key";
 
+    private static final String KEY_COUPANG_MARKET_NAME = "coupang_market_name";
+
+    private static final String KEY_COUPANG_CREDENTIALS = "coupang_credentials";
+
 
 
     private static final String FIELD_KEY = "key";
@@ -59,6 +63,12 @@ public class CredentialStore {
     private static final String FIELD_SOURCE_URI = "sourceUri";
 
     private static final String FIELD_ENABLED = "enabled";
+
+    private static final String FIELD_VENDOR_ID = "vendorId";
+
+    private static final String FIELD_ACCESS_KEY = "accessKey";
+
+    private static final String FIELD_SECRET_KEY = "secretKey";
 
 
 
@@ -377,8 +387,29 @@ public class CredentialStore {
 
 
     public void saveCoupangCredentials(String vendorId, String accessKey, String secretKey) {
+        saveCoupangCredentials("홈런마켓", vendorId, accessKey, secretKey);
+    }
+
+    public void saveCoupangCredentials(String marketName, String vendorId, String accessKey, String secretKey) {
+        List<CoupangCredentials> credentials = getCoupangCredentialsList();
+        CoupangCredentials updated = new CoupangCredentials(marketName, vendorId, accessKey, secretKey);
+        boolean replaced = false;
+        for (int i = 0; i < credentials.size(); i++) {
+            CoupangCredentials existing = credentials.get(i);
+            if (sameCoupangCredential(existing, updated)) {
+                credentials.set(i, updated);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            credentials.add(updated);
+        }
+        saveCoupangCredentialsList(credentials);
 
         preferences.edit()
+
+                .putString(KEY_COUPANG_MARKET_NAME, safe(marketName).isEmpty() ? "홈런마켓" : safe(marketName))
 
                 .putString(KEY_COUPANG_VENDOR_ID, safe(vendorId))
 
@@ -393,8 +424,14 @@ public class CredentialStore {
 
 
     public CoupangCredentials getCoupangCredentials() {
+        List<CoupangCredentials> credentials = getCoupangCredentialsList();
+        if (!credentials.isEmpty()) {
+            return credentials.get(0);
+        }
 
         return new CoupangCredentials(
+
+                preferences.getString(KEY_COUPANG_MARKET_NAME, "홈런마켓"),
 
                 preferences.getString(KEY_COUPANG_VENDOR_ID, ""),
 
@@ -460,9 +497,9 @@ public class CredentialStore {
 
         int count = getActiveCafe24Markets().size();
 
-        if (FeatureFlags.ENABLE_COUPANG && getCoupangCredentials().isComplete()) {
+        if (FeatureFlags.ENABLE_COUPANG) {
 
-            count++;
+            count += getCompleteCoupangCredentialsList().size();
 
         }
 
@@ -484,7 +521,7 @@ public class CredentialStore {
 
         return getConnectedCafe24Count() > 0
 
-                || (FeatureFlags.ENABLE_COUPANG && getCoupangCredentials().isComplete());
+                || (FeatureFlags.ENABLE_COUPANG && !getCompleteCoupangCredentialsList().isEmpty());
 
     }
 
@@ -564,8 +601,123 @@ public class CredentialStore {
 
 
 
-        return "쿠팡\nVendorId " + credentials.getVendorId() + "\nAccessKey " + mask(credentials.getAccessKey());
+        List<CoupangCredentials> credentialsList = getCompleteCoupangCredentialsList();
+        if (credentialsList.size() > 1) {
+            StringBuilder builder = new StringBuilder("쿠팡 ").append(credentialsList.size()).append("개 연결");
+            for (CoupangCredentials item : credentialsList) {
+                builder.append("\n").append(item.getMarketName()).append(" / VendorId ").append(item.getVendorId());
+            }
+            return builder.toString();
+        }
 
+        return credentials.getMarketName() + " / 쿠팡\nVendorId " + credentials.getVendorId() + "\nAccessKey " + mask(credentials.getAccessKey());
+
+    }
+
+    public List<CoupangCredentials> getCoupangCredentialsList() {
+        ensureCoupangMigration();
+        return readCoupangCredentialsList();
+    }
+
+    public List<CoupangCredentials> getCompleteCoupangCredentialsList() {
+        List<CoupangCredentials> complete = new ArrayList<>();
+        for (CoupangCredentials credentials : getCoupangCredentialsList()) {
+            if (credentials.isComplete()) {
+                complete.add(credentials);
+            }
+        }
+        return complete;
+    }
+
+    public CoupangCredentials findCoupangCredentialsForMarket(String marketName) {
+        String normalized = normalizeMarketName(marketName);
+        for (CoupangCredentials credentials : getCompleteCoupangCredentialsList()) {
+            if (normalizeMarketName(credentials.getMarketName()).equals(normalized)) {
+                return credentials;
+            }
+        }
+        for (CoupangCredentials credentials : getCompleteCoupangCredentialsList()) {
+            String candidate = normalizeMarketName(credentials.getMarketName());
+            if (!candidate.isEmpty() && (candidate.contains(normalized) || normalized.contains(candidate))) {
+                return credentials;
+            }
+        }
+        return getCoupangCredentials();
+    }
+
+    private void ensureCoupangMigration() {
+        if (preferences.contains(KEY_COUPANG_CREDENTIALS)) {
+            return;
+        }
+        JSONArray array = new JSONArray();
+        String vendorId = safe(preferences.getString(KEY_COUPANG_VENDOR_ID, ""));
+        String accessKey = safe(preferences.getString(KEY_COUPANG_ACCESS_KEY, ""));
+        String secretKey = safe(preferences.getString(KEY_COUPANG_SECRET_KEY, ""));
+        if (!vendorId.isEmpty() && !accessKey.isEmpty() && !secretKey.isEmpty()) {
+            try {
+                JSONObject object = new JSONObject();
+                object.put(FIELD_NAME, safe(preferences.getString(KEY_COUPANG_MARKET_NAME, "홈런마켓")));
+                object.put(FIELD_VENDOR_ID, vendorId);
+                object.put(FIELD_ACCESS_KEY, accessKey);
+                object.put(FIELD_SECRET_KEY, secretKey);
+                array.put(object);
+            } catch (Exception ignored) {
+            }
+        }
+        preferences.edit().putString(KEY_COUPANG_CREDENTIALS, array.toString()).apply();
+    }
+
+    private List<CoupangCredentials> readCoupangCredentialsList() {
+        List<CoupangCredentials> credentials = new ArrayList<>();
+        String raw = preferences.getString(KEY_COUPANG_CREDENTIALS, "[]");
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject object = array.optJSONObject(i);
+                if (object == null) {
+                    continue;
+                }
+                CoupangCredentials item = new CoupangCredentials(
+                        object.optString(FIELD_NAME, "홈런마켓"),
+                        object.optString(FIELD_VENDOR_ID, ""),
+                        object.optString(FIELD_ACCESS_KEY, ""),
+                        object.optString(FIELD_SECRET_KEY, "")
+                );
+                if (item.isComplete()) {
+                    credentials.add(item);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return credentials;
+    }
+
+    private void saveCoupangCredentialsList(List<CoupangCredentials> credentials) {
+        JSONArray array = new JSONArray();
+        for (CoupangCredentials item : credentials) {
+            if (item == null || !item.isComplete()) {
+                continue;
+            }
+            try {
+                JSONObject object = new JSONObject();
+                object.put(FIELD_NAME, item.getMarketName());
+                object.put(FIELD_VENDOR_ID, item.getVendorId());
+                object.put(FIELD_ACCESS_KEY, item.getAccessKey());
+                object.put(FIELD_SECRET_KEY, item.getSecretKey());
+                array.put(object);
+            } catch (Exception ignored) {
+            }
+        }
+        preferences.edit().putString(KEY_COUPANG_CREDENTIALS, array.toString()).apply();
+    }
+
+    private boolean sameCoupangCredential(CoupangCredentials left, CoupangCredentials right) {
+        return normalizeMarketName(left.getMarketName()).equals(normalizeMarketName(right.getMarketName()))
+                || safe(left.getVendorId()).equalsIgnoreCase(safe(right.getVendorId()));
+    }
+
+    private String normalizeMarketName(String value) {
+        return safe(value).replaceAll("\\s+", "").toLowerCase();
     }
 
 

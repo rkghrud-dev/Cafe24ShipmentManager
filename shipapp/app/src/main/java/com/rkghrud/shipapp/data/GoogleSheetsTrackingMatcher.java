@@ -1,5 +1,6 @@
 package com.rkghrud.shipapp.data;
 
+import android.content.Context;
 import android.util.Base64;
 
 import com.rkghrud.shipapp.BuildConfig;
@@ -86,23 +87,40 @@ public final class GoogleSheetsTrackingMatcher {
     }
 
     public static MatchResult applyToOrders(List<DispatchOrder> orders) throws Exception {
+        return applyToOrders(null, orders);
+    }
+
+    public static MatchResult applyToOrders(Context context, List<DispatchOrder> orders) throws Exception {
         if (orders == null || orders.isEmpty()) {
             return new MatchResult(buildLiveMatchSourceName(orders), 0, 0, 0, 0, 0, 0, 0, 0, "");
         }
 
-        ensureConfigured();
-        String accessToken = getCachedAccessToken();
+        String accessToken = getAccessToken(context);
         try {
             return applyToOrdersWithToken(accessToken, orders);
         } catch (Exception ex) {
             String message = ex.getMessage() == null ? "" : ex.getMessage();
             if (message.contains("401") || message.contains("인증 실패")) {
                 invalidateAccessToken();
-                accessToken = getCachedAccessToken();
+                if (context != null) {
+                    new GoogleSheetsAuthStore(context).invalidateAccessToken();
+                }
+                accessToken = getAccessToken(context);
                 return applyToOrdersWithToken(accessToken, orders);
             }
             throw ex;
         }
+    }
+
+    private static String getAccessToken(Context context) throws Exception {
+        if (context != null) {
+            GoogleSheetsAuthStore store = new GoogleSheetsAuthStore(context);
+            if (store.hasRefreshToken()) {
+                return store.getFreshAccessToken();
+            }
+        }
+        ensureConfigured();
+        return getCachedAccessToken();
     }
 
     private static MatchResult applyToOrdersWithToken(String accessToken, List<DispatchOrder> orders) throws Exception {
@@ -118,10 +136,16 @@ public final class GoogleSheetsTrackingMatcher {
         List<String> headersRow = rows.get(headerRowIndex);
         int phoneColumnIndex = detectPhoneColumn(headersRow);
         int trackingColumnIndex = detectTrackingColumn(headersRow);
+        PendingWindow pendingWindow = pendingShipment
+                ? detectPendingWindow(rows, headerRowIndex)
+                : PendingWindow.NONE;
 
         List<SheetRow> parsedRows = new ArrayList<>();
         int trackingRowCount = 0;
         for (int rowIndex = headerRowIndex + 1; rowIndex < rows.size(); rowIndex++) {
+            if (pendingShipment && !pendingWindow.contains(rowIndex)) {
+                continue;
+            }
             List<String> row = rows.get(rowIndex);
             String vendorName = getCell(row, DEFAULT_VENDOR_COLUMN_INDEX);
             if (vendorName.isEmpty()) {
@@ -148,7 +172,7 @@ public final class GoogleSheetsTrackingMatcher {
             ));
         }
 
-        return new ParsedSheet(parsedRows.size(), trackingRowCount, parsedRows, PendingWindow.NONE);
+        return new ParsedSheet(parsedRows.size(), trackingRowCount, parsedRows, pendingWindow, pendingShipment);
     }
 
     private static List<List<String>> readSheetRows(String accessToken, String sheetName) throws Exception {
@@ -198,7 +222,9 @@ public final class GoogleSheetsTrackingMatcher {
             mergedRows.addAll(pendingSheet.rows);
         }
 
-        return new ParsedSheet(sheetRowCount, trackingRowCount, mergedRows, PendingWindow.NONE);
+        PendingWindow pendingWindow = pendingSheet == null ? PendingWindow.NONE : pendingSheet.pendingWindow;
+        boolean requiresPendingClose = pendingSheet != null && pendingSheet.requiresPendingClose;
+        return new ParsedSheet(sheetRowCount, trackingRowCount, mergedRows, pendingWindow, requiresPendingClose);
     }
 
     static MatchResult applyRowsToOrders(ParsedSheet parsedSheet, List<DispatchOrder> orders) {
@@ -234,6 +260,13 @@ public final class GoogleSheetsTrackingMatcher {
             }
 
             if (trackingResolution.state == MatchState.MATCHED) {
+                if (parsedSheet.requiresPendingClose && parsedSheet.pendingWindow.isEmpty()) {
+                    applyMatchedTracking(order, trackingResolution.matchedRow, false);
+                    order.markPendingShipment("미출고 마감 대기", -1);
+                    matchedCount++;
+                    pendingBlockedCount++;
+                    continue;
+                }
                 applyMatchedTracking(order, trackingResolution.matchedRow, true);
                 matchedCount++;
                 continue;
@@ -674,7 +707,7 @@ public final class GoogleSheetsTrackingMatcher {
         return token;
     }
 
-    static synchronized void invalidateAccessToken() {
+    public static synchronized void invalidateAccessToken() {
         cachedAccessToken = "";
         cachedTokenExpiry = 0L;
     }
@@ -982,16 +1015,23 @@ public final class GoogleSheetsTrackingMatcher {
         final int trackingRowCount;
         final List<SheetRow> rows;
         final PendingWindow pendingWindow;
+        final boolean requiresPendingClose;
 
         ParsedSheet(int sheetRowCount, int trackingRowCount, List<SheetRow> rows) {
-            this(sheetRowCount, trackingRowCount, rows, PendingWindow.NONE);
+            this(sheetRowCount, trackingRowCount, rows, PendingWindow.NONE, false);
         }
 
         ParsedSheet(int sheetRowCount, int trackingRowCount, List<SheetRow> rows, PendingWindow pendingWindow) {
+            this(sheetRowCount, trackingRowCount, rows, pendingWindow, false);
+        }
+
+        ParsedSheet(int sheetRowCount, int trackingRowCount, List<SheetRow> rows,
+                    PendingWindow pendingWindow, boolean requiresPendingClose) {
             this.sheetRowCount = sheetRowCount;
             this.trackingRowCount = trackingRowCount;
             this.rows = rows;
             this.pendingWindow = pendingWindow == null ? PendingWindow.NONE : pendingWindow;
+            this.requiresPendingClose = requiresPendingClose;
         }
     }
 
@@ -1046,6 +1086,10 @@ public final class GoogleSheetsTrackingMatcher {
                 }
             }
             return previousDate.equals(activeDateForRow(rowIndex));
+        }
+
+        boolean isEmpty() {
+            return previousDate.isEmpty() || latestDate.isEmpty();
         }
 
         private String activeDateForRow(int rowIndex) {

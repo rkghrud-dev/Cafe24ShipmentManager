@@ -50,9 +50,18 @@ internal static class Program
                 return;
             }
 
+            if (quiet || argSet.Contains("/install") || argSet.Contains("-install"))
+            {
+                Install(
+                    createDesktopShortcut: !argSet.Contains("/noshortcut") && !argSet.Contains("-noshortcut"),
+                    launchAfterInstall: !argSet.Contains("/nolaunch") && !argSet.Contains("-nolaunch"),
+                    quiet: quiet);
+                return;
+            }
+
             var choice = ShowSetupWindow();
             if (choice.Action == SetupAction.Install)
-                Install(choice.CreateDesktopShortcut, choice.LaunchAfterInstall);
+                Install(choice.CreateDesktopShortcut, choice.LaunchAfterInstall, quiet: false);
             else if (choice.Action == SetupAction.Remove)
                 Uninstall(fromTemp: false, quiet: false);
         }
@@ -180,7 +189,7 @@ internal static class Program
         return choice;
     }
 
-    private static void Install(bool createDesktopShortcut, bool launchAfterInstall)
+    private static void Install(bool createDesktopShortcut, bool launchAfterInstall, bool quiet)
     {
         StopRunningApps();
         Directory.CreateDirectory(InstallRoot);
@@ -232,8 +241,11 @@ internal static class Program
                 });
             }
 
-            MessageBox.Show($"설치/업데이트가 완료되었습니다.\n\n버전: {PackageVersion}\n설치 위치: {InstallRoot}",
-                AppDisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!quiet)
+            {
+                MessageBox.Show($"설치/업데이트가 완료되었습니다.\n\n버전: {PackageVersion}\n설치 위치: {InstallRoot}",
+                    AppDisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
         finally
         {

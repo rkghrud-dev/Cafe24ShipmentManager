@@ -15,6 +15,13 @@ def buildConfigString = { String value ->
     return "\"${safe}\""
 }
 
+def googleSheetsClientId = localProperties.getProperty("shipapp.googleSheetsClientId", "")
+def defaultGoogleRedirectScheme = googleSheetsClientId
+        ? "com.googleusercontent.apps." + googleSheetsClientId.replace(".apps.googleusercontent.com", "")
+        : "com.rkghrud.shipapp"
+def googleOAuthRedirectScheme = localProperties.getProperty("shipapp.googleOAuthRedirectScheme", defaultGoogleRedirectScheme)
+def googleOAuthRedirectUri = localProperties.getProperty("shipapp.googleOAuthRedirectUri", googleOAuthRedirectScheme + ":/oauth2redirect")
+
 android {
     namespace "com.rkghrud.shipapp"
     compileSdk 36
@@ -33,6 +40,8 @@ android {
         buildConfigField "String", "GOOGLE_SHEETS_REFRESH_TOKEN", buildConfigString(localProperties.getProperty("shipapp.googleSheetsRefreshToken", ""))
         buildConfigField "String", "GOOGLE_SHEETS_SA_EMAIL", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSaEmail", ""))
         buildConfigField "String", "GOOGLE_SHEETS_SA_PRIVATE_KEY", buildConfigString(localProperties.getProperty("shipapp.googleSheetsSaPrivateKey", ""))
+        buildConfigField "String", "GOOGLE_OAUTH_REDIRECT_URI", buildConfigString(googleOAuthRedirectUri)
+        manifestPlaceholders = [appAuthRedirectScheme: googleOAuthRedirectScheme]
     }
 
     buildTypes {
@@ -61,6 +70,7 @@ dependencies {
     implementation "androidx.recyclerview:recyclerview:1.4.0"
     implementation "androidx.swiperefreshlayout:swiperefreshlayout:1.1.0"
     implementation "androidx.work:work-runtime:2.10.1"
+    implementation "net.openid:appauth:0.11.1"
     testImplementation "junit:junit:4.13.2"
     testImplementation "org.json:json:20240303"
 }

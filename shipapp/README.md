@@ -21,10 +21,13 @@ These files are intentionally ignored by git. Add them only on your local machin
 Example `coupang.properties`:
 
 ```properties
+marketName=홈런마켓
 vendorId=A00000000
 accessKey=your-access-key
 secretKey=your-secret-key
 ```
+
+`marketName` must match the vendor/market name used in the Google Sheets dispatch rows.
 
 ## Important
 

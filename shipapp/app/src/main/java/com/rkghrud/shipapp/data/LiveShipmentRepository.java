@@ -145,11 +145,11 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
         String coupangStatus = "";
 
-        if (FeatureFlags.ENABLE_COUPANG && credentialStore.getCoupangCredentials().isComplete()) {
+        if (FeatureFlags.ENABLE_COUPANG && !credentialStore.getCompleteCoupangCredentialsList().isEmpty()) {
 
-            connectedCount++;
+            connectedCount += credentialStore.getCompleteCoupangCredentialsList().size();
 
-            SourceFetchResult result = fetchCoupangSource();
+            SourceFetchResult result = fetchCoupangSources();
 
             shipments.addAll(result.shipments);
 
@@ -411,9 +411,27 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
 
-    private SourceFetchResult fetchCoupangSource() {
+    private SourceFetchResult fetchCoupangSources() {
+        List<ShipmentSummary> shipments = new ArrayList<>();
+        List<String> statuses = new ArrayList<>();
+        boolean anySuccess = false;
+        for (CoupangCredentials credentials : credentialStore.getCompleteCoupangCredentialsList()) {
+            SourceFetchResult result = fetchCoupangSource(credentials);
+            shipments.addAll(result.shipments);
+            statuses.add(result.statusText);
+            if (result.success) {
+                anySuccess = true;
+            }
+        }
+        if (statuses.isEmpty()) {
+            return SourceFetchResult.failure("쿠팡\n미연결");
+        }
+        return anySuccess
+                ? SourceFetchResult.success(String.join("\n\n", statuses), dedupeShipments(shipments))
+                : SourceFetchResult.failure(String.join("\n\n", statuses));
+    }
 
-        CoupangCredentials credentials = credentialStore.getCoupangCredentials();
+    private SourceFetchResult fetchCoupangSource(CoupangCredentials credentials) {
 
         if (!credentials.isComplete()) {
 
@@ -531,7 +549,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
 
-            String status = "쿠팡\nVendorId " + credentials.getVendorId() + "\n조회 성공 " + shipments.size() + "건";
+            String status = credentials.buildMarketLabel() + "\nVendorId " + credentials.getVendorId() + "\n조회 성공 " + shipments.size() + "건";
 
             return SourceFetchResult.success(status, dedupeShipments(shipments));
 
@@ -665,13 +683,13 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
             shipments.add(new ShipmentSummary(
 
-                    "홈런마켓 / 쿠팡",
+                    credentialStore.getCoupangCredentials().buildMarketLabel(),
 
                     orderId,
 
                     ref,
 
-                    "쿠팡",
+                    credentialStore.getCoupangCredentials().getMarketName(),
 
                     recipientName,
 
@@ -1876,11 +1894,27 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
 
     private List<DispatchOrder> fetchCoupangDispatchOrders(LocalDate start, LocalDate end) throws Exception {
+        List<DispatchOrder> orders = new ArrayList<>();
+        List<Exception> errors = new ArrayList<>();
+        for (CoupangCredentials creds : credentialStore.getCompleteCoupangCredentialsList()) {
+            try {
+                orders.addAll(fetchCoupangDispatchOrders(creds, start, end));
+            } catch (Exception ex) {
+                errors.add(ex);
+            }
+        }
+        if (orders.isEmpty() && !errors.isEmpty()) {
+            throw errors.get(0);
+        }
+        return orders;
+    }
 
-        CoupangCredentials creds = credentialStore.getCoupangCredentials();
+    private List<DispatchOrder> fetchCoupangDispatchOrders(CoupangCredentials creds, LocalDate start, LocalDate end) throws Exception {
 
         if (!creds.isComplete()) throw new Exception("쿠팡 키가 없습니다.");
 
+        String marketName = creds.getMarketName();
+        String marketLabel = creds.buildMarketLabel();
 
 
         List<DispatchOrder> orders = new ArrayList<>();
@@ -1981,7 +2015,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
                         DispatchOrder dispatchOrder = new DispatchOrder(
 
-                                "홈런마켓 / 쿠팡", "coupang",
+                                marketLabel, "coupang", marketName,
 
                                 orderId, vendorItemId, boxId, status,
 
@@ -2514,7 +2548,7 @@ public class LiveShipmentRepository implements ShipmentRepository {
 
     private String pushCoupangTracking(DispatchOrder order, String deliveryCode) throws Exception {
 
-        CoupangCredentials creds = credentialStore.getCoupangCredentials();
+        CoupangCredentials creds = credentialStore.findCoupangCredentialsForMarket(order.marketName);
 
         if (!creds.isComplete()) return "쿠팡 키 없음";
 

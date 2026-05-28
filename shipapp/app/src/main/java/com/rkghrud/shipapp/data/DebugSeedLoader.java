@@ -36,11 +36,12 @@ public final class DebugSeedLoader {
 
         Properties properties = readProperties(context, "seeds/coupang.properties");
         if (properties != null) {
+            String marketName = properties.getProperty("marketName", "홈런마켓").trim();
             String vendorId = properties.getProperty("vendorId", "").trim();
             String accessKey = properties.getProperty("accessKey", "").trim();
             String secretKey = properties.getProperty("secretKey", "").trim();
             if (!vendorId.isEmpty() && !accessKey.isEmpty() && !secretKey.isEmpty()) {
-                store.saveCoupangCredentials(vendorId, accessKey, secretKey);
+                store.saveCoupangCredentials(marketName, vendorId, accessKey, secretKey);
                 loaded++;
             }
         }

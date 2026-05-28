@@ -1,6 +1,6 @@
 param(
     [string]$Runtime = 'win-x64',
-    [string]$AuthProjectPath = "$env:USERPROFILE\Desktop\Cafe24Auth\Cafe24Auth.csproj",
+    [string]$AuthProjectPath = '',
     [switch]$SelfContainedApps,
     [string]$PackageVersion = ''
 )
@@ -17,9 +17,26 @@ $PublishRoot = Join-Path $ScratchRoot 'publish'
 $MainPublish = Join-Path $PublishRoot 'Cafe24ShipmentManager'
 $AuthPublish = Join-Path $PublishRoot 'Cafe24Auth'
 $SetupPublish = Join-Path $PublishRoot 'SetupBootstrapper'
+$SetupZipStage = Join-Path $ScratchRoot 'setup-zip'
 $SetupOutputPath = Join-Path $DistRoot 'Cafe24ShipmentManager-Setup.exe'
+$SetupZipOutputPath = Join-Path $DistRoot 'Cafe24ShipmentManager-Setup.zip'
 if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
     $PackageVersion = Get-Date -Format 'yyyy.MM.dd.HHmm'
+}
+
+if ([string]::IsNullOrWhiteSpace($AuthProjectPath)) {
+    $authProjectCandidates = @(
+        (Join-Path $env:USERPROFILE 'Desktop\프로젝트\Cafe24Auth\Cafe24Auth.csproj'),
+        (Join-Path $env:USERPROFILE 'Desktop\Cafe24Auth\Cafe24Auth.csproj')
+    )
+
+    $AuthProjectPath = $authProjectCandidates |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+
+    if ([string]::IsNullOrWhiteSpace($AuthProjectPath)) {
+        $AuthProjectPath = $authProjectCandidates[0]
+    }
 }
 
 function Assert-SafeGeneratedPath([string]$Path) {
@@ -188,4 +205,8 @@ if (-not (Test-Path -LiteralPath $setupExe)) {
 }
 
 Copy-Item -LiteralPath $setupExe -Destination $SetupOutputPath -Force
+Reset-Directory $SetupZipStage
+Copy-Item -LiteralPath $SetupOutputPath -Destination (Join-Path $SetupZipStage 'Cafe24ShipmentManager-Setup.exe') -Force
+New-Zip -SourceDir $SetupZipStage -DestinationZip $SetupZipOutputPath
 Write-Host "Created: $SetupOutputPath"
+Write-Host "Created: $SetupZipOutputPath"

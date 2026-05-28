@@ -87,6 +87,8 @@ import com.rkghrud.shipapp.data.DebugSeedLoader;
 import com.rkghrud.shipapp.data.DispatchOrder;
 import com.rkghrud.shipapp.data.DispatchOrderUiHelper;
 
+import com.rkghrud.shipapp.data.GoogleSheetsAuthStore;
+
 import com.rkghrud.shipapp.data.GoogleSheetsTrackingMatcher;
 
 import com.rkghrud.shipapp.data.LiveShipmentRepository;
@@ -104,6 +106,17 @@ import com.rkghrud.shipapp.workers.ShipmentAlertWorker;
 
 
 import org.json.JSONObject;
+
+import net.openid.appauth.AuthorizationException;
+import net.openid.appauth.AuthorizationRequest;
+import net.openid.appauth.AuthorizationResponse;
+import net.openid.appauth.AuthorizationService;
+import net.openid.appauth.AuthorizationServiceConfiguration;
+import net.openid.appauth.ClientAuthentication;
+import net.openid.appauth.ClientSecretPost;
+import net.openid.appauth.NoClientAuthentication;
+import net.openid.appauth.ResponseTypeValues;
+import net.openid.appauth.TokenRequest;
 
 
 
@@ -139,6 +152,7 @@ import java.util.List;
 import java.util.Locale;
 
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 
 import java.util.concurrent.ExecutorService;
@@ -290,6 +304,16 @@ public class MainActivity extends AppCompatActivity {
     private final ActivityResultLauncher<String[]> spreadsheetImportLauncher =
 
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::handleSpreadsheetImportResult);
+
+    private final ActivityResultLauncher<String[]> coupangImportLauncher =
+
+            registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::handleCoupangImportResult);
+
+    private final ActivityResultLauncher<Intent> googleAuthLauncher =
+
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+
+                    result -> handleGoogleAuthResult(result.getData()));
 
 
 
@@ -542,18 +566,31 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (FeatureFlags.ENABLE_COUPANG
-                && credentialStore.getCoupangCredentials().isComplete()
+                && !credentialStore.getCompleteCoupangCredentialsList().isEmpty()
                 && DispatchOrderUiHelper.matchesMarketKey(COUPANG_KEY, requestedMarketKey)) {
-            result.connectedCount++;
-            marketCountLabels.put("쿠팡", "0");
+            List<CoupangCredentials> coupangCredentials = credentialStore.getCompleteCoupangCredentialsList();
+            result.connectedCount += coupangCredentials.size();
+            for (CoupangCredentials credentials : coupangCredentials) {
+                marketCountLabels.put(credentials.getMarketName(), "0");
+            }
             try {
                 List<DispatchOrder> coupangOrders = repository.fetchOrdersForDispatch(COUPANG_KEY, startDate, endDate);
                 result.orders.addAll(coupangOrders);
-                marketCountLabels.put("쿠팡", String.valueOf(coupangOrders.size()));
-                result.coupangStatus = "쿠팡\n조회 성공 " + coupangOrders.size() + "건";
+                for (CoupangCredentials credentials : coupangCredentials) {
+                    int count = 0;
+                    for (DispatchOrder order : coupangOrders) {
+                        if (credentials.getMarketName().equals(order.marketName)) {
+                            count++;
+                        }
+                    }
+                    marketCountLabels.put(credentials.getMarketName(), String.valueOf(count));
+                }
+                result.coupangStatus = "쿠팡 " + coupangCredentials.size() + "개\n조회 성공 " + coupangOrders.size() + "건";
                 result.fetchedCount++;
             } catch (Exception ex) {
-                marketCountLabels.put("쿠팡", "확인 필요");
+                for (CoupangCredentials credentials : coupangCredentials) {
+                    marketCountLabels.put(credentials.getMarketName(), "확인 필요");
+                }
                 result.coupangStatus = "쿠팡\n확인 필요\n" + clipMessage(ex.getMessage());
                 result.errors.add("쿠팡 조회 실패: " + ex.getMessage());
             }
@@ -677,7 +714,8 @@ public class MainActivity extends AppCompatActivity {
 
         currentCoupangStatus = FeatureFlags.ENABLE_COUPANG ? credentialStore.getCoupangStatus() : "";
 
-        currentConnectedCount = currentActiveCafe24Keys.size() + ((FeatureFlags.ENABLE_COUPANG && credentialStore.getCoupangCredentials().isComplete()) ? 1 : 0);
+        currentConnectedCount = currentActiveCafe24Keys.size()
+                + (FeatureFlags.ENABLE_COUPANG ? credentialStore.getCompleteCoupangCredentialsList().size() : 0);
 
         currentFetchedCount = 0;
 
@@ -844,9 +882,9 @@ public class MainActivity extends AppCompatActivity {
 
         }
 
-        if (FeatureFlags.ENABLE_COUPANG && credentialStore.getCoupangCredentials().isComplete()) {
+        if (FeatureFlags.ENABLE_COUPANG && !credentialStore.getCompleteCoupangCredentialsList().isEmpty()) {
 
-            marketFilterLabels.add("쿠팡");
+            marketFilterLabels.add("쿠팡 전체");
 
             marketFilterKeys.add(COUPANG_KEY);
 
@@ -1375,7 +1413,7 @@ public class MainActivity extends AppCompatActivity {
         executorService.execute(() -> {
             try {
                 GoogleSheetsTrackingMatcher.MatchResult result =
-                        GoogleSheetsTrackingMatcher.applyToOrders(targetOrders);
+                        GoogleSheetsTrackingMatcher.applyToOrders(this, targetOrders);
                 runOnUiThread(() -> {
                     setLoading(false);
                     applyFilters();
@@ -1662,6 +1700,22 @@ public class MainActivity extends AppCompatActivity {
 
         });
 
+        dialogView.findViewById(R.id.btnSettingsCoupangApi).setOnClickListener(v -> {
+
+            dialog.dismiss();
+
+            showCoupangDialog();
+
+        });
+
+        dialogView.findViewById(R.id.btnSettingsGoogleSheetsLogin).setOnClickListener(v -> {
+
+            dialog.dismiss();
+
+            launchGoogleSheetsLogin();
+
+        });
+
         dialogView.findViewById(R.id.btnSettingsClearKeys).setOnClickListener(v -> {
 
             dialog.dismiss();
@@ -1678,6 +1732,68 @@ public class MainActivity extends AppCompatActivity {
 
         dialog.show();
 
+    }
+
+    private void launchGoogleSheetsLogin() {
+        String clientId = BuildConfig.GOOGLE_SHEETS_CLIENT_ID == null
+                ? ""
+                : BuildConfig.GOOGLE_SHEETS_CLIENT_ID.trim();
+        if (clientId.isEmpty()) {
+            showToast(getString(R.string.google_sheets_login_missing_client));
+            return;
+        }
+
+        AuthorizationServiceConfiguration configuration = new AuthorizationServiceConfiguration(
+                Uri.parse("https://accounts.google.com/o/oauth2/v2/auth"),
+                Uri.parse("https://oauth2.googleapis.com/token"));
+        AuthorizationRequest request = new AuthorizationRequest.Builder(
+                configuration,
+                clientId,
+                ResponseTypeValues.CODE,
+                Uri.parse(BuildConfig.GOOGLE_OAUTH_REDIRECT_URI))
+                .setScope("https://www.googleapis.com/auth/spreadsheets")
+                .setPrompt("consent select_account")
+                .build();
+        AuthorizationService authService = new AuthorizationService(this);
+        googleAuthLauncher.launch(authService.getAuthorizationRequestIntent(request));
+    }
+
+    private void handleGoogleAuthResult(@Nullable Intent data) {
+        if (data == null) {
+            showToast(getString(R.string.google_sheets_login_failed, "응답이 없습니다."));
+            return;
+        }
+        AuthorizationResponse response = AuthorizationResponse.fromIntent(data);
+        AuthorizationException exception = AuthorizationException.fromIntent(data);
+        if (response == null) {
+            String message = exception == null ? "인증이 취소되었습니다." : exception.getMessage();
+            showToast(getString(R.string.google_sheets_login_failed, message));
+            return;
+        }
+
+        TokenRequest tokenRequest = response.createTokenExchangeRequest();
+        AuthorizationService authService = new AuthorizationService(this);
+        authService.performTokenRequest(tokenRequest, buildGoogleClientAuthentication(), (tokenResponse, tokenException) -> {
+            authService.dispose();
+            if (tokenResponse == null) {
+                String message = tokenException == null ? "토큰을 받지 못했습니다." : tokenException.getMessage();
+                runOnUiThread(() -> showToast(getString(R.string.google_sheets_login_failed, message)));
+                return;
+            }
+            new GoogleSheetsAuthStore(this).saveTokenResponse(tokenResponse);
+            GoogleSheetsTrackingMatcher.invalidateAccessToken();
+            runOnUiThread(() -> showToast(getString(R.string.google_sheets_login_success)));
+        });
+    }
+
+    private ClientAuthentication buildGoogleClientAuthentication() {
+        String secret = BuildConfig.GOOGLE_SHEETS_CLIENT_SECRET == null
+                ? ""
+                : BuildConfig.GOOGLE_SHEETS_CLIENT_SECRET.trim();
+        if (secret.isEmpty()) {
+            return NoClientAuthentication.INSTANCE;
+        }
+        return new ClientSecretPost(secret);
     }
 
     private void configureAppearanceSettings(View dialogView, @Nullable AlertDialog dialog) {
@@ -2531,7 +2647,8 @@ public class MainActivity extends AppCompatActivity {
 
         int connectedCafe24Count = credentialStore.getConnectedCafe24Count();
 
-        boolean coupangConnected = FeatureFlags.ENABLE_COUPANG && credentialStore.getCoupangCredentials().isComplete();
+        int coupangConnectedCount = FeatureFlags.ENABLE_COUPANG ? credentialStore.getCompleteCoupangCredentialsList().size() : 0;
+        boolean coupangConnected = coupangConnectedCount > 0;
 
 
 
@@ -2553,7 +2670,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (FeatureFlags.ENABLE_COUPANG) {
 
-            summary.append(" / 쿠팡 ").append(coupangConnected ? "연결" : "미연결");
+            summary.append(" / 쿠팡 ").append(coupangConnected ? coupangConnectedCount + "개 연결" : "미연결");
 
         }
 
@@ -2748,6 +2865,7 @@ public class MainActivity extends AppCompatActivity {
     private void showCoupangDialog() {
 
         CoupangCredentials current = credentialStore.getCoupangCredentials();
+        List<CoupangCredentials> savedCredentials = credentialStore.getCompleteCoupangCredentialsList();
 
 
 
@@ -2761,6 +2879,8 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+        EditText marketNameInput = buildInput(R.string.hint_coupang_market_name, current.getMarketName());
+
         EditText vendorIdInput = buildInput(R.string.hint_vendor_id, current.getVendorId());
 
         EditText accessKeyInput = buildInput(R.string.hint_access_key, current.getAccessKey());
@@ -2769,11 +2889,26 @@ public class MainActivity extends AppCompatActivity {
 
 
 
+        container.addView(marketNameInput);
+
         container.addView(vendorIdInput);
 
         container.addView(accessKeyInput);
 
         container.addView(secretKeyInput);
+
+        TextView savedView = new TextView(this);
+        savedView.setText(savedCredentials.isEmpty()
+                ? "저장된 쿠팡 키 없음"
+                : "저장된 쿠팡 키 " + savedCredentials.size() + "개\n" + buildCoupangSavedSummary(savedCredentials));
+        savedView.setTextSize(12);
+        savedView.setPadding(0, 0, 0, dpToPx(10));
+        container.addView(savedView);
+
+        MaterialButton importButton = new MaterialButton(this);
+        importButton.setText("TXT 파일로 추가");
+        importButton.setOnClickListener(v -> coupangImportLauncher.launch(new String[]{"text/*", "application/octet-stream", "*/*"}));
+        container.addView(importButton);
 
 
 
@@ -2789,13 +2924,15 @@ public class MainActivity extends AppCompatActivity {
 
                 .setPositiveButton(R.string.save_label, (dialog, which) -> {
 
+                    String marketName = marketNameInput.getText().toString().trim();
+
                     String vendorId = vendorIdInput.getText().toString().trim();
 
                     String accessKey = accessKeyInput.getText().toString().trim();
 
                     String secretKey = secretKeyInput.getText().toString().trim();
 
-                    if (vendorId.isEmpty() || accessKey.isEmpty() || secretKey.isEmpty()) {
+                    if (marketName.isEmpty() || vendorId.isEmpty() || accessKey.isEmpty() || secretKey.isEmpty()) {
 
                         showToast(getString(R.string.coupang_save_failed));
 
@@ -2803,7 +2940,7 @@ public class MainActivity extends AppCompatActivity {
 
                     }
 
-                    credentialStore.saveCoupangCredentials(vendorId, accessKey, secretKey);
+                    credentialStore.saveCoupangCredentials(marketName, vendorId, accessKey, secretKey);
 
                     showToast(getString(R.string.coupang_save_success));
 
@@ -2813,6 +2950,92 @@ public class MainActivity extends AppCompatActivity {
 
                 .show();
 
+    }
+
+    private void handleCoupangImportResult(Uri uri) {
+        if (uri == null) {
+            return;
+        }
+        try {
+            CoupangCredentials credentials = parseCoupangCredentialsText(readText(uri), resolveDocumentLabel(uri));
+            if (!credentials.isComplete()) {
+                showToast(getString(R.string.coupang_save_failed));
+                return;
+            }
+            credentialStore.saveCoupangCredentials(
+                    credentials.getMarketName(),
+                    credentials.getVendorId(),
+                    credentials.getAccessKey(),
+                    credentials.getSecretKey()
+            );
+            showToast(credentials.getMarketName() + " 쿠팡 키를 추가했습니다.");
+            refreshOrders();
+        } catch (Exception ex) {
+            showToast(getString(R.string.import_failed_prefix) + ex.getMessage());
+        }
+    }
+
+    private CoupangCredentials parseCoupangCredentialsText(String text, String fileName) throws IOException {
+        Properties properties = new Properties();
+        properties.load(new java.io.StringReader(text == null ? "" : text));
+        String marketName = firstNonEmpty(
+                properties.getProperty("marketName", ""),
+                properties.getProperty("market_name", ""),
+                properties.getProperty("vendor_name", ""),
+                properties.getProperty("mall_name", ""),
+                extractCommentValue(text, "Linking company name"),
+                extractMarketNameFromFileName(fileName)
+        );
+        String vendorId = firstNonEmpty(
+                properties.getProperty("vendorId", ""),
+                properties.getProperty("vendor_id", ""),
+                properties.getProperty("vendor", "")
+        );
+        String accessKey = firstNonEmpty(
+                properties.getProperty("accessKey", ""),
+                properties.getProperty("access_key", "")
+        );
+        String secretKey = firstNonEmpty(
+                properties.getProperty("secretKey", ""),
+                properties.getProperty("secret_key", "")
+        );
+        return new CoupangCredentials(marketName, vendorId, accessKey, secretKey);
+    }
+
+    private String buildCoupangSavedSummary(List<CoupangCredentials> credentials) {
+        StringBuilder builder = new StringBuilder();
+        for (CoupangCredentials item : credentials) {
+            if (builder.length() > 0) {
+                builder.append('\n');
+            }
+            builder.append(item.getMarketName()).append(" / ").append(item.getVendorId());
+        }
+        return builder.toString();
+    }
+
+    private String extractCommentValue(String text, String label) {
+        if (text == null || label == null) {
+            return "";
+        }
+        String prefix = "# " + label + ":";
+        for (String line : text.split("\\r?\\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith(prefix)) {
+                return trimmed.substring(prefix.length()).trim();
+            }
+        }
+        return "";
+    }
+
+    private String extractMarketNameFromFileName(String fileName) {
+        String name = fileName == null ? "" : fileName;
+        if (name.contains("junbi") || name.contains("준비")) {
+            return "준비몰";
+        }
+        if (name.contains("wing") || name.contains("home") || name.contains("홈런")) {
+            return "홈런마켓";
+        }
+        return "홈런마켓";
     }
 
 
@@ -3136,6 +3359,19 @@ public class MainActivity extends AppCompatActivity {
 
         return value == null ? "" : value.trim();
 
+    }
+
+    private String firstNonEmpty(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String value : values) {
+            String cleaned = safeText(value);
+            if (!cleaned.isEmpty()) {
+                return cleaned;
+            }
+        }
+        return "";
     }
 
 
