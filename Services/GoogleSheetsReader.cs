@@ -344,7 +344,7 @@ public class GoogleSheetsReader
                 rawDict[result.Headers[col]] = GetCell(col);
 
             var normalizedPhone = PhoneNormalizer.Normalize(phone);
-            var sourceKey = $"{vendor}|{normalizedPhone}|{tracking}";
+            var sourceKey = $"{sheetName}|{vendor}|{normalizedPhone}|{tracking}|{row}";
 
             result.Rows.Add(new ShipmentSourceRow
             {
@@ -358,6 +358,7 @@ public class GoogleSheetsReader
                 OrderDate = orderDate,
                 ShippingCompany = shippingCompany,
                 RawData = JsonConvert.SerializeObject(rawDict),
+                SourceSheetName = sheetName,
                 ProcessStatus = "pending",
                 ImportedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
             });
@@ -423,7 +424,7 @@ public class GoogleSheetsReader
             var phone = phoneColumnIndex >= 0 ? GetCell(phoneColumnIndex) : GetCell(6);
             var shippingCompany = shippingCompanyColumnIndex >= 0 ? GetCell(shippingCompanyColumnIndex) : "";
             var normalizedPhone = PhoneNormalizer.Normalize(phone);
-            var sourceKey = $"{vendor}|{normalizedPhone}|{recipientName}|{tracking}|{rowIndex}";
+            var sourceKey = $"{sheetName}|{vendor}|{normalizedPhone}|{recipientName}|{tracking}|{rowIndex}";
 
             result.Rows.Add(new ShipmentSourceRow
             {
@@ -433,6 +434,7 @@ public class GoogleSheetsReader
                 RecipientPhone = normalizedPhone,
                 RecipientName = recipientName,
                 ShippingCompany = shippingCompany,
+                SourceSheetName = sheetName,
                 ProcessStatus = "pending_shipment",
                 ImportedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 SheetRowIndex = rowIndex,

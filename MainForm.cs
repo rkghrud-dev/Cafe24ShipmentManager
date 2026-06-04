@@ -36,6 +36,7 @@ public partial class MainForm : Form
     private const int StockDefaultSheetGid = 2073400281;
     private const string PendingShipmentSheetName = "미출고 정보";
     private const string PreferredShipmentSheetName = "cj발주서";
+    private const string ReservationShipmentSheetName = "발송예약";
     private const string ProductInfoSheetName = "상품정보";
     private string _pendingShipmentWindowLabel = "";
 
@@ -1511,12 +1512,10 @@ public partial class MainForm : Form
             var endDate = dtpEnd.Value;
 
             _excelResult = await Task.Run(() =>
-                selectedVendors.Count > 0
-                    ? sheetsReader.ReadSheetFiltered(_spreadsheetId, sheetName, selectedVendors, startDate, endDate)
-                    : sheetsReader.ReadSheet(_spreadsheetId, sheetName));
+                ReadShipmentSheetsForMatching(sheetsReader, sheetName, selectedVendors, startDate, endDate));
 
             _filteredRows = _excelResult.Rows;
-            _log.Info($"스프레드시트 '{sheetName}' 로드: {_filteredRows.Count}행" +
+            _log.Info($"스프레드시트 '{BuildShipmentLoadLabel(sheetName, _excelResult)}' 로드: {_filteredRows.Count}행" +
                 (selectedVendors.Count > 0 ? $" (발주사 {selectedVendors.Count}개 필터)" : " (전체)"));
 
             // DB 저장: 필터된 행만 단일 트랜잭션으로 처리
@@ -1551,6 +1550,59 @@ public partial class MainForm : Form
             btnMatch.Enabled = true;
             btnMatch.Text = "🔍 매칭 실행";
         }
+    }
+
+    private ExcelReadResult ReadShipmentSheetsForMatching(
+        GoogleSheetsReader sheetsReader,
+        string sheetName,
+        HashSet<string> selectedVendors,
+        DateTime startDate,
+        DateTime endDate)
+    {
+        var result = ReadShipmentSheetForMatching(sheetsReader, _spreadsheetId, sheetName, selectedVendors, startDate, endDate);
+        var shouldLoadReservation = IsPreferredShipmentSheet(sheetName);
+        if (!shouldLoadReservation)
+            return result;
+
+        try
+        {
+            var reservation = ReadShipmentSheetForMatching(sheetsReader, _spreadsheetId, ReservationShipmentSheetName, selectedVendors, startDate, endDate);
+            result.Rows.AddRange(reservation.Rows);
+            result.Vendors = result.Rows.Select(r => r.VendorName).Distinct().OrderBy(v => v).ToList();
+            _log.Info($"'{ReservationShipmentSheetName}' 시트 추가 로드: {reservation.Rows.Count}행");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"'{ReservationShipmentSheetName}' 시트 추가 로드 실패: {ex.Message}");
+        }
+
+        return result;
+    }
+
+    private static ExcelReadResult ReadShipmentSheetForMatching(
+        GoogleSheetsReader sheetsReader,
+        string spreadsheetId,
+        string sheetName,
+        HashSet<string> selectedVendors,
+        DateTime startDate,
+        DateTime endDate)
+    {
+        return selectedVendors.Count > 0
+            ? sheetsReader.ReadSheetFiltered(spreadsheetId, sheetName, selectedVendors, startDate, endDate)
+            : sheetsReader.ReadSheet(spreadsheetId, sheetName);
+    }
+
+    private static bool IsPreferredShipmentSheet(string sheetName)
+    {
+        return string.Equals(sheetName, PreferredShipmentSheetName, StringComparison.OrdinalIgnoreCase) ||
+               sheetName.Contains(PreferredShipmentSheetName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildShipmentLoadLabel(string sheetName, ExcelReadResult result)
+    {
+        return result.Rows.Any(IsReservationShipmentRow)
+            ? $"{sheetName} + {ReservationShipmentSheetName}"
+            : sheetName;
     }
 
     private void WireMatchGridCheckInteractions()
@@ -1656,6 +1708,7 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("SrcPhone", "출고-휴대폰");
         dgvMatch.Columns.Add("SrcName", "출고-수령인");
         dgvMatch.Columns.Add("SrcTracking", "송장번호");
+        dgvMatch.Columns.Add("SourceSheet", "출처");
         dgvMatch.Columns.Add("Cafe24Market", "마켓");
         dgvMatch.Columns.Add("Cafe24Order", "주문번호");
         dgvMatch.Columns.Add("OrdPhone", "주문-휴대폰");
@@ -1668,6 +1721,7 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("MStatus", "상태");
 
         dgvMatch.Columns["MrId"]!.Width = 40;
+        dgvMatch.Columns["SourceSheet"]!.Width = 80;
         dgvMatch.Columns["Cafe24Market"]!.Width = 90;
         dgvMatch.Columns["OrderQty"]!.Width = 75;
         dgvMatch.Columns["TotalOrderQty"]!.Width = 95;
@@ -1679,9 +1733,10 @@ public partial class MainForm : Form
         {
             var mr = _matchResults[i];
             var marketName = ResolveMarketDisplayName(mr);
+            var sourceSheetName = ResolveSourceSheetName(mr);
             var auto = mr.MatchStatus == "auto_confirmed" && !mr.PendingShipment;
             var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
-                mr.SourceTracking, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
+                mr.SourceTracking, sourceSheetName, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
                 mr.OrderProduct, mr.OrderQuantity, mr.TotalOrderQuantity, mr.StockQuantityText,
                 ConfLabel(mr.Confidence), ResolveMatchStatusLabel(mr));
 
@@ -1692,6 +1747,13 @@ public partial class MainForm : Form
                 dgvMatch.Rows[idx].Cells["StockQty"].Style.BackColor = Color.FromArgb(220, 53, 69);
                 dgvMatch.Rows[idx].Cells["StockQty"].Style.ForeColor = Color.White;
             }
+
+            if (IsReservationShipmentMatch(mr))
+            {
+                dgvMatch.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(232, 244, 255);
+                dgvMatch.Rows[idx].Cells["SourceSheet"].Style.BackColor = Color.FromArgb(25, 118, 210);
+                dgvMatch.Rows[idx].Cells["SourceSheet"].Style.ForeColor = Color.White;
+            }
         }
 
         _log.Info($"매칭: 전체 {_matchResults.Count} | " +
@@ -1700,7 +1762,24 @@ public partial class MainForm : Form
             $"후보 {_matchResults.Count(m => m.Confidence == "candidate")} | " +
             $"송장없음 {_matchResults.Count(m => m.Confidence == "no_tracking")} | " +
             $"미매칭 {_matchResults.Count(m => m.Confidence == "none")} | " +
+            $"발송예약 {_matchResults.Count(IsReservationShipmentMatch)} | " +
             $"미출고확인 {_matchResults.Count(m => m.PendingShipment)}");
+    }
+
+    private string ResolveSourceSheetName(MatchResult matchResult)
+    {
+        return FindSourceRowForMatch(matchResult)?.SourceSheetName ?? "";
+    }
+
+    private bool IsReservationShipmentMatch(MatchResult matchResult)
+    {
+        var source = FindSourceRowForMatch(matchResult);
+        return source != null && IsReservationShipmentRow(source);
+    }
+
+    private static bool IsReservationShipmentRow(ShipmentSourceRow row)
+    {
+        return string.Equals(row.SourceSheetName, ReservationShipmentSheetName, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveMatchStatusLabel(MatchResult matchResult)

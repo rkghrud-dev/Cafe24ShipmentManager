@@ -13,6 +13,7 @@ public class ShipmentSourceRow
     public string OrderDate { get; set; } = "";      // D열: 발주일
     public string ShippingCompany { get; set; } = "";
     public string RawData { get; set; } = "";        // JSON: 원본 행 전체
+    public string SourceSheetName { get; set; } = "";
     public string ProcessStatus { get; set; } = "pending"; // pending/matched/pushed/failed
     public string ImportedAt { get; set; } = "";
     public string? MatchedOrderId { get; set; }
