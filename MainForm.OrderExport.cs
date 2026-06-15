@@ -1915,16 +1915,32 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private static IReadOnlyDictionary<string, string> LoadWebocrMarketProductCodeMappings()
     {
+        var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var nameCandidates = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        LoadWebocrMarketUploadStateMappings(mappings, nameCandidates);
+        LoadWebocrJobUploadMappings(mappings, nameCandidates);
+
+        foreach (var pair in nameCandidates)
+        {
+            if (pair.Value.Count == 1)
+                mappings.TryAdd(pair.Key, pair.Value.First());
+        }
+
+        return mappings;
+    }
+
+    private static void LoadWebocrMarketUploadStateMappings(
+        Dictionary<string, string> mappings,
+        Dictionary<string, HashSet<string>> nameCandidates)
+    {
         var path = ResolveWebocrMarketUploadStatePath();
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            return;
 
         try
         {
             var root = JObject.Parse(File.ReadAllText(path, Encoding.UTF8));
-            var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var nameCandidates = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-
             foreach (var property in root.Properties())
             {
                 var gsCode = ExtractProductCode(property.Name);
@@ -1958,18 +1974,51 @@ internal static class ShipmentRequestOrderExportFormatterEx
                     }
                 }
             }
-
-            foreach (var pair in nameCandidates)
-            {
-                if (pair.Value.Count == 1)
-                    mappings[pair.Key] = pair.Value.First();
-            }
-
-            return mappings;
         }
         catch
         {
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // 상태파일이 없거나 오래된 형식이면 jobs fallback으로 보강한다.
+        }
+    }
+
+    private static void LoadWebocrJobUploadMappings(
+        Dictionary<string, string> mappings,
+        Dictionary<string, HashSet<string>> nameCandidates)
+    {
+        var jobsRoot = ResolveWebocrJobsRoot();
+        if (string.IsNullOrWhiteSpace(jobsRoot) || !Directory.Exists(jobsRoot))
+            return;
+
+        IEnumerable<string> files;
+        try
+        {
+            files = Directory.EnumerateFiles(jobsRoot, "*.json", SearchOption.TopDirectoryOnly)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .Take(2000)
+                .ToList();
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var file in files)
+        {
+            try
+            {
+                var root = JObject.Parse(File.ReadAllText(file, Encoding.UTF8));
+                var results = root.SelectToken("result.results") as JArray
+                              ?? root["results"] as JArray;
+                if (results == null)
+                    continue;
+
+                foreach (var token in results.OfType<JObject>())
+                    AddWebocrJobResultMapping(token, mappings, nameCandidates);
+            }
+            catch
+            {
+                // 개별 job 파일 손상은 전체 매핑을 막지 않는다.
+            }
         }
     }
 
@@ -1983,10 +2032,93 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return Path.Combine(keyRoot, "market_upload_state.json");
     }
 
+    private static string ResolveWebocrJobsRoot()
+    {
+        var explicitRoot = Environment.GetEnvironmentVariable("WEBOCR_JOBS_ROOT");
+        if (!string.IsNullOrWhiteSpace(explicitRoot))
+            return explicitRoot.Trim();
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var desktop = Path.Combine(userProfile, "Desktop");
+        foreach (var candidate in new[]
+        {
+            Path.Combine(desktop, "WEBOCRV2_LOCAL", "webocrcludev2", "data", "jobs"),
+            Path.Combine(desktop, "WEBOCRV2", "webocrcludev2", "data", "jobs"),
+            Path.Combine(desktop, "webocrcludev2", "data", "jobs"),
+        })
+        {
+            if (Directory.Exists(candidate))
+                return candidate;
+        }
+
+        return string.Empty;
+    }
+
     private static bool IsSuccessfulWebocrUploadStatus(string status)
         => status.Equals("OK", StringComparison.OrdinalIgnoreCase)
            || status.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase)
-           || status.Equals("SKIP_DUP", StringComparison.OrdinalIgnoreCase);
+           || status.Equals("SKIP_DUP", StringComparison.OrdinalIgnoreCase)
+           || status.Equals("UPLOADED", StringComparison.OrdinalIgnoreCase);
+
+    private static void AddWebocrJobResultMapping(
+        JObject row,
+        Dictionary<string, string> mappings,
+        Dictionary<string, HashSet<string>> nameCandidates)
+    {
+        var status = row["status"]?.ToString() ?? "";
+        var rawStatus = row["rawStatus"]?.ToString() ?? "";
+        if (!IsSuccessfulWebocrUploadStatus(status) && !IsSuccessfulWebocrUploadStatus(rawStatus))
+            return;
+
+        var gsCode = new[]
+            {
+                ExtractProductCode(row["gs"]?.ToString()),
+                ExtractProductCode(row["GsCode"]?.ToString()),
+                ExtractProductCode(row["queueKey"]?.ToString()),
+            }
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
+        if (string.IsNullOrWhiteSpace(gsCode))
+            return;
+
+        var marketKey = NormalizeWebocrMarketKey(
+            row["market"]?.ToString()
+            ?? row["channel"]?.ToString()
+            ?? row["queueKey"]?.ToString());
+        if (string.IsNullOrWhiteSpace(marketKey) || marketKey == "*")
+            return;
+
+        foreach (var id in new[]
+        {
+            row["productId"]?.ToString(),
+            row["sellerProductId"]?.ToString(),
+            row["spdNo"]?.ToString(),
+            row["ProductId"]?.ToString(),
+            row["SellerProductId"]?.ToString(),
+            row["SpdNo"]?.ToString(),
+            row["existingProductId"]?.ToString(),
+        })
+        {
+            AddWebocrMapping(mappings, marketKey, "id", id, gsCode);
+            AddWebocrMapping(mappings, "*", "id", id, gsCode);
+        }
+
+        foreach (var name in new[]
+        {
+            row["title"]?.ToString(),
+            row["sourceName"]?.ToString(),
+            row["name"]?.ToString(),
+            row["Name"]?.ToString(),
+        })
+        {
+            var normalizedName = NormalizeWebocrProductName(name);
+            if (!string.IsNullOrWhiteSpace(normalizedName))
+            {
+                AddNameCandidate(nameCandidates, BuildWebocrMappingKey(marketKey, "name", normalizedName), gsCode);
+                AddNameCandidate(nameCandidates, BuildWebocrMappingKey("*", "name", normalizedName), gsCode);
+            }
+        }
+    }
+
 
     private static void AddWebocrMapping(
         Dictionary<string, string> mappings,
