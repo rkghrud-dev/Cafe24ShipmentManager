@@ -45,6 +45,8 @@ public partial class MainForm : Form
     private List<ShipmentSourceRow> _filteredRows = new();
     private List<Cafe24Order> _cafe24Orders = new();
     private List<MatchResult> _matchResults = new();
+    private IReadOnlyDictionary<string, ProductStockInfo> _previewProductStockLookup =
+        new Dictionary<string, ProductStockInfo>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CheckBox> _sourceFilterBoxes = new(StringComparer.OrdinalIgnoreCase);
 
     // ── Top Bar (공통) ──
@@ -495,6 +497,7 @@ public partial class MainForm : Form
     private void ApplyMatchResultOrderFlags(IReadOnlyDictionary<string, ProductStockInfo>? productStockLookup = null)
     {
         var todayOrderQuantityByProductCode = BuildTodayOrderQuantityByProductCode(_filteredRows);
+        var productRowsByOrderKey = BuildPreviewProductRowsByOrderKeyEx();
 
         foreach (var matchResult in _matchResults)
         {
@@ -505,6 +508,12 @@ public partial class MainForm : Form
                 matchResult.OrderQuantity = order?.Quantity ?? 0;
 
             var productCode = NormalizeProductCode(matchResult.ProductCode);
+            if (order != null &&
+                productRowsByOrderKey.TryGetValue(ShipmentRequestOrderExportFormatterEx.BuildOrderKey(order), out var productRow) &&
+                !string.IsNullOrWhiteSpace(productRow.ProductCode))
+            {
+                productCode = NormalizeProductCode(productRow.ProductCode);
+            }
             matchResult.ProductCode = productCode;
 
             if (!string.IsNullOrWhiteSpace(productCode) &&
@@ -1375,6 +1384,15 @@ public partial class MainForm : Form
             }
 
             var pendingShipmentCount = await ApplyPendingShipmentFlagsAsync(mergedOrders);
+            var excludedCount = mergedOrders.Count(IsOrderExcludedFromFetchEx);
+            if (excludedCount > 0)
+                mergedOrders = mergedOrders.Where(order => !IsOrderExcludedFromFetchEx(order)).ToList();
+
+            var sheetsReader = _sheetsReader;
+            _previewProductStockLookup = sheetsReader == null
+                ? new Dictionary<string, ProductStockInfo>(StringComparer.OrdinalIgnoreCase)
+                : await LoadProductInfoStockLookupAsync(sheetsReader);
+            btnMatch.Text = "🔍 매칭 실행";
 
             _cafe24Orders = mergedOrders
                 .OrderByDescending(order => order.PendingShipment)
@@ -1403,11 +1421,13 @@ public partial class MainForm : Form
                 : "";
             lblStatus.Text = $"✅ 출고대상 주문 {_cafe24Orders.Count}건 조회 완료" +
                              (string.IsNullOrWhiteSpace(summary) ? "" : $" ({summary})") +
-                             pendingSummary;
+                             pendingSummary +
+                             (excludedCount > 0 ? $" / 제외 {excludedCount}건" : "");
             lblStatus.ForeColor = Color.DarkGreen;
             _log.Info($"출고대상 주문 {_cafe24Orders.Count}건 캐시 완료" +
                       (string.IsNullOrWhiteSpace(summary) ? "" : $" [{summary}]") +
-                      (pendingShipmentCount > 0 ? $" / 미출고 확인 {pendingShipmentCount}건" : ""));
+                      (pendingShipmentCount > 0 ? $" / 미출고 확인 {pendingShipmentCount}건" : "") +
+                      (excludedCount > 0 ? $" / 제외 {excludedCount}건" : ""));
 
             tabShipSub.SelectedIndex = 0;
         }
@@ -1446,12 +1466,15 @@ public partial class MainForm : Form
         dgvData.Rows.Clear();
 
         EnsureOrderSelectionColumnEx();
+        EnsureOrderAdditionCheckColumnEx();
 
         dgvData.Columns.Add("Source", "수집원");
         dgvData.Columns.Add("No", "#");
         dgvData.Columns.Add("OrderId", "주문번호");
         dgvData.Columns.Add("Market", "마켓");
         dgvData.Columns.Add("OrderDate", "주문일");
+        dgvData.Columns.Add("ProductCode", "상품코드");
+        dgvData.Columns.Add("StockQty", "실재고");
         dgvData.Columns.Add("ProductName", "상품명");
         dgvData.Columns.Add("Qty", "수량");
         dgvData.Columns.Add("Name", "수령인명");
@@ -1460,11 +1483,14 @@ public partial class MainForm : Form
         dgvData.Columns.Add(OrderProgressColumnNameEx, "진행사항");
 
         dgvData.Columns[OrderSelectColumnNameEx]!.Width = 50;
+        dgvData.Columns[OrderAdditionCheckColumnNameEx]!.Width = 72;
         dgvData.Columns["Source"]!.Width = 120;
         dgvData.Columns["No"]!.Width = 40;
         dgvData.Columns["OrderId"]!.Width = 130;
         dgvData.Columns["Market"]!.Width = 90;
         dgvData.Columns["OrderDate"]!.Width = 90;
+        dgvData.Columns["ProductCode"]!.Width = 105;
+        dgvData.Columns["StockQty"]!.Width = 70;
         dgvData.Columns["ProductName"]!.Width = 190;
         dgvData.Columns["Qty"]!.Width = 45;
         dgvData.Columns["Name"]!.Width = 75;
@@ -1472,19 +1498,27 @@ public partial class MainForm : Form
         dgvData.Columns["OrderStatus"]!.Width = 80;
         dgvData.Columns[OrderProgressColumnNameEx]!.Width = 110;
 
+        var productRowsByOrderKey = BuildPreviewProductRowsByOrderKeyEx();
         for (int i = 0; i < _cafe24Orders.Count; i++)
         {
             var order = _cafe24Orders[i];
             var phone = string.IsNullOrWhiteSpace(order.RecipientCellPhone) ? order.RecipientPhone : order.RecipientCellPhone;
             var marketName = ResolveMarketDisplayName(order);
             var sourceLabel = ResolveSourceDisplayLabel(order);
-            var rowIndex = dgvData.Rows.Add(false, sourceLabel, i + 1, order.OrderId, marketName, order.OrderDate, order.ProductName,
+            var productCode = productRowsByOrderKey.TryGetValue(ShipmentRequestOrderExportFormatterEx.BuildOrderKey(order), out var productRow)
+                ? NormalizeProductCode(productRow.ProductCode)
+                : "";
+            var stockText = !string.IsNullOrWhiteSpace(productCode) && _previewProductStockLookup.TryGetValue(productCode, out var stockInfo)
+                ? stockInfo.DisplayText
+                : "";
+            var rowIndex = dgvData.Rows.Add(false, false, sourceLabel, i + 1, order.OrderId, marketName, order.OrderDate, productCode, stockText, order.ProductName,
                 order.Quantity, order.RecipientName, phone, order.OrderStatus, ResolveOrderProgressLabelEx(order));
             dgvData.Rows[rowIndex].Tag = order;
             ApplyPreviewOrderProgressEx(dgvData.Rows[rowIndex], order);
         }
 
         RefreshDataPreviewProgressStatesEx();
+        ApplyPreviewVisibleColumnsEx();
         UpdateOrderSelectionSummaryEx();
     }
     private async Task ExecuteMatchingAsync()
@@ -1709,6 +1743,7 @@ public partial class MainForm : Form
         dgvMatch.Columns.Add("SrcName", "출고-수령인");
         dgvMatch.Columns.Add("SrcTracking", "송장번호");
         dgvMatch.Columns.Add("SourceSheet", "출처");
+        dgvMatch.Columns.Add("ProductCode", "상품코드");
         dgvMatch.Columns.Add("Cafe24Market", "마켓");
         dgvMatch.Columns.Add("Cafe24Order", "주문번호");
         dgvMatch.Columns.Add("OrdPhone", "주문-휴대폰");
@@ -1722,6 +1757,7 @@ public partial class MainForm : Form
 
         dgvMatch.Columns["MrId"]!.Width = 40;
         dgvMatch.Columns["SourceSheet"]!.Width = 80;
+        dgvMatch.Columns["ProductCode"]!.Width = 105;
         dgvMatch.Columns["Cafe24Market"]!.Width = 90;
         dgvMatch.Columns["OrderQty"]!.Width = 75;
         dgvMatch.Columns["TotalOrderQty"]!.Width = 95;
@@ -1736,7 +1772,7 @@ public partial class MainForm : Form
             var sourceSheetName = ResolveSourceSheetName(mr);
             var auto = mr.MatchStatus == "auto_confirmed" && !mr.PendingShipment;
             var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
-                mr.SourceTracking, sourceSheetName, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
+                mr.SourceTracking, sourceSheetName, mr.ProductCode, marketName, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
                 mr.OrderProduct, mr.OrderQuantity, mr.TotalOrderQuantity, mr.StockQuantityText,
                 ConfLabel(mr.Confidence), ResolveMatchStatusLabel(mr));
 

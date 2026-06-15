@@ -1052,6 +1052,17 @@ public partial class MainForm
                     _orderProgressStateByKeyEx[entry.Key] = normalized;
             }
 
+            _excludedOrderKeysEx.Clear();
+            foreach (var key in st.ExcludedOrderKeys ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(key))
+                    _excludedOrderKeysEx.Add(key);
+            }
+
+            _visiblePreviewColumnsEx = new HashSet<string>(
+                st.VisiblePreviewColumns ?? BuildDefaultPreviewColumnSetEx().ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
             if (DateTime.TryParse(st.StockAlertMutedDate, out var dt)) _stockAlertMutedDateEx = dt.Date;
         }
         catch { }
@@ -1071,7 +1082,9 @@ public partial class MainForm
                 ImportCostYuanColumnInitialized = true,
                 OrderProgressByKey = _orderProgressStateByKeyEx
                     .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase),
+                ExcludedOrderKeys = _excludedOrderKeysEx.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
+                VisiblePreviewColumns = _visiblePreviewColumnsEx.ToList()
             };
             File.WriteAllText(GetEnhancedStatePath(), JsonConvert.SerializeObject(st, Formatting.Indented));
         }
@@ -1133,6 +1146,8 @@ public partial class MainForm
         public string? YuanRate { get; set; }
         public bool? ImportCostYuanColumnInitialized { get; set; }
         public Dictionary<string, string>? OrderProgressByKey { get; set; }
+        public List<string>? ExcludedOrderKeys { get; set; }
+        public List<string>? VisiblePreviewColumns { get; set; }
     }
 }
 

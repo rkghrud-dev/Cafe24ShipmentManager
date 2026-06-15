@@ -12,15 +12,21 @@ namespace Cafe24ShipmentManager;
 public partial class MainForm
 {
     private const string OrderSelectColumnNameEx = "OrderSelectedEx";
+    private const string OrderAdditionCheckColumnNameEx = "OrderAdditionCheckEx";
     private const string OrderProgressColumnNameEx = "OrderProgressEx";
 
     private Button? _btnOrderSelectAllEx;
     private Button? _btnOrderDeselectAllEx;
     private Button? _btnOrderExportEx;
+    private Button? _btnOrderSelectCopiedEx;
+    private Button? _btnOrderSelectFetchedEx;
+    private Button? _btnOrderPreviewColumnsEx;
+    private Button? _btnOrderExcludeNextFetchEx;
     private Label? _lblOrderSelectionEx;
     private Button? _btnMarketCodeAuditEx;
     private ComboBox? _cboOrderExportMarketEx;
     private DateTimePicker? _dtpOrderExportDateEx;
+    private CheckBox? _chkOrderExportAdditionCheckEx;
     private CheckBox? _chkOrderExportSupplierProductEx;
     private CheckBox? _chkOrderExportOptionEx;
     private Label? _lblOrderExportMarketColumnEx;
@@ -32,6 +38,8 @@ public partial class MainForm
     private bool _orderExportUiInitializedEx;
     private bool _orderExportDateDropdownOpenEx;
     private readonly Dictionary<string, string> _orderProgressStateByKeyEx = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _excludedOrderKeysEx = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _visiblePreviewColumnsEx = BuildDefaultPreviewColumnSetEx();
 
     private void EnsureOrderExportUi()
     {
@@ -84,6 +92,38 @@ public partial class MainForm
             Height = 30,
             Location = new Point(505, 3)
         };
+        _btnOrderSelectCopiedEx = new Button
+        {
+            Name = "btnOrderSelectCopiedEx",
+            Text = "복사완료만 체크",
+            Width = 116,
+            Height = 30,
+            Location = new Point(602, 3)
+        };
+        _btnOrderSelectFetchedEx = new Button
+        {
+            Name = "btnOrderSelectFetchedEx",
+            Text = "조회완료만 체크",
+            Width = 116,
+            Height = 30,
+            Location = new Point(722, 3)
+        };
+        _btnOrderPreviewColumnsEx = new Button
+        {
+            Name = "btnOrderPreviewColumnsEx",
+            Text = "컬럼선택",
+            Width = 86,
+            Height = 30,
+            Location = new Point(842, 3)
+        };
+        _btnOrderExcludeNextFetchEx = new Button
+        {
+            Name = "btnOrderExcludeNextFetchEx",
+            Text = "다음조회 제외",
+            Width = 106,
+            Height = 30,
+            Location = new Point(932, 3)
+        };
 
         panel.Controls.AddRange(new Control[]
         {
@@ -91,22 +131,30 @@ public partial class MainForm
             _btnOrderDeselectAllEx,
             _btnOrderExportEx,
             _lblOrderSelectionEx,
-            _btnMarketCodeAuditEx
+            _btnMarketCodeAuditEx,
+            _btnOrderSelectCopiedEx,
+            _btnOrderSelectFetchedEx,
+            _btnOrderPreviewColumnsEx,
+            _btnOrderExcludeNextFetchEx
         });
 
         _btnOrderSelectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(true);
         _btnOrderDeselectAllEx.Click += (_, _) => SetAllPreviewOrdersCheckedEx(false);
         _btnOrderExportEx.Click += (_, _) => ShowOrderExportPopupMenuEx();
         _btnMarketCodeAuditEx.Click += async (_, _) => await RunMarketCodeAuditExAsync();
+        _btnOrderSelectCopiedEx.Click += (_, _) => SetPreviewOrdersCheckedByProgressEx("copied");
+        _btnOrderSelectFetchedEx.Click += (_, _) => SetPreviewOrdersCheckedByProgressEx("");
+        _btnOrderPreviewColumnsEx.Click += (_, _) => ShowPreviewColumnSelectDialogEx();
+        _btnOrderExcludeNextFetchEx.Click += (_, _) => ExcludeCheckedPreviewOrdersFromNextFetchEx();
 
         dgvData.CurrentCellDirtyStateChanged += (_, _) =>
         {
-            if (dgvData.IsCurrentCellDirty && dgvData.CurrentCell?.OwningColumn?.Name == OrderSelectColumnNameEx)
+            if (dgvData.IsCurrentCellDirty && IsOrderExportCheckColumnEx(dgvData.CurrentCell?.OwningColumn?.Name))
                 dgvData.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
         dgvData.CellValueChanged += (_, e) =>
         {
-            if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && dgvData.Columns[e.ColumnIndex].Name == OrderSelectColumnNameEx)
+            if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && IsOrderExportCheckColumnEx(dgvData.Columns[e.ColumnIndex].Name))
                 UpdateOrderSelectionSummaryEx();
         };
 
@@ -251,6 +299,11 @@ public partial class MainForm
         return value.Length <= 900 ? value : value[..900] + "...";
     }
 
+    private static bool IsOrderExportCheckColumnEx(string? columnName)
+    {
+        return columnName == OrderSelectColumnNameEx || columnName == OrderAdditionCheckColumnNameEx;
+    }
+
     private void EnsureOrderSelectionColumnEx()
     {
         if (dgvData.Columns.Contains(OrderSelectColumnNameEx)) return;
@@ -265,6 +318,23 @@ public partial class MainForm
             AutoSizeMode = DataGridViewAutoSizeColumnMode.None
         };
         dgvData.Columns.Insert(0, col);
+    }
+
+    private void EnsureOrderAdditionCheckColumnEx()
+    {
+        if (dgvData.Columns.Contains(OrderAdditionCheckColumnNameEx)) return;
+
+        var col = new DataGridViewCheckBoxColumn
+        {
+            Name = OrderAdditionCheckColumnNameEx,
+            HeaderText = "추가확인",
+            Width = 72,
+            TrueValue = true,
+            FalseValue = false,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.None
+        };
+        var insertIndex = dgvData.Columns.Contains(OrderSelectColumnNameEx) ? 1 : 0;
+        dgvData.Columns.Insert(insertIndex, col);
     }
 
     private void EnsureOrderExportPopupMenuEx()
@@ -284,6 +354,13 @@ public partial class MainForm
             Format = DateTimePickerFormat.Custom,
             CustomFormat = "yyyy-MM-dd",
             Value = DateTime.Today
+        };
+        _chkOrderExportAdditionCheckEx = new CheckBox
+        {
+            AutoSize = true,
+            Checked = false,
+            Text = "추가확인",
+            Margin = new Padding(0, 4, 12, 0)
         };
         _chkOrderExportSupplierProductEx = new CheckBox
         {
@@ -336,6 +413,7 @@ public partial class MainForm
             }));
             RefreshOrderExportPopupSummaryEx();
         };
+        _chkOrderExportAdditionCheckEx.CheckedChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
         _chkOrderExportSupplierProductEx.CheckedChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
         _chkOrderExportOptionEx.CheckedChanged += (_, _) => RefreshOrderExportPopupSummaryEx();
 
@@ -409,6 +487,48 @@ public partial class MainForm
         UpdateOrderSelectionSummaryEx();
     }
 
+    private void SetPreviewOrdersCheckedByProgressEx(string progressCode)
+    {
+        if (!dgvData.Columns.Contains(OrderSelectColumnNameEx)) return;
+
+        var normalized = NormalizeOrderProgressCodeEx(progressCode);
+        foreach (DataGridViewRow row in dgvData.Rows)
+        {
+            if (row.IsNewRow) continue;
+            var shouldCheck = row.Tag is Cafe24Order order &&
+                              string.Equals(GetPersistedOrderProgressCodeEx(order), normalized, StringComparison.OrdinalIgnoreCase);
+            row.Cells[OrderSelectColumnNameEx].Value = shouldCheck;
+        }
+
+        UpdateOrderSelectionSummaryEx();
+    }
+
+    private void ExcludeCheckedPreviewOrdersFromNextFetchEx()
+    {
+        var checkedOrders = GetCheckedPreviewOrdersEx();
+        if (checkedOrders.Count == 0)
+        {
+            MessageBox.Show(this, "다음 조회에서 제외할 주문을 체크하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        foreach (var order in checkedOrders)
+        {
+            var key = BuildOrderStateKeyEx(order);
+            if (!string.IsNullOrWhiteSpace(key))
+                _excludedOrderKeysEx.Add(key);
+        }
+
+        _cafe24Orders = _cafe24Orders
+            .Where(order => !_excludedOrderKeysEx.Contains(BuildOrderStateKeyEx(order)))
+            .ToList();
+
+        SaveEnhancedState();
+        ShowDataPreview();
+        lblStatus.Text = $"다음 조회 제외 {checkedOrders.Count}건 저장됨";
+        lblStatus.ForeColor = Color.DarkOrange;
+    }
+
     private List<Cafe24Order> GetCheckedPreviewOrdersEx()
     {
         var result = new List<Cafe24Order>();
@@ -429,6 +549,32 @@ public partial class MainForm
     {
         var value = row.Cells[OrderSelectColumnNameEx].Value;
         return value is bool flag && flag;
+    }
+
+    private bool IsPreviewOrderAdditionCheckedEx(DataGridViewRow row)
+    {
+        if (!dgvData.Columns.Contains(OrderAdditionCheckColumnNameEx))
+            return false;
+
+        var value = row.Cells[OrderAdditionCheckColumnNameEx].Value;
+        return value is bool flag && flag;
+    }
+
+    private HashSet<string> GetAdditionCheckedOrderKeysEx()
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!dgvData.Columns.Contains(OrderAdditionCheckColumnNameEx))
+            return result;
+
+        foreach (DataGridViewRow row in dgvData.Rows)
+        {
+            if (row.IsNewRow) continue;
+            if (!IsPreviewOrderAdditionCheckedEx(row)) continue;
+            if (row.Tag is Cafe24Order order)
+                result.Add(ShipmentRequestOrderExportFormatterEx.BuildOrderKey(order));
+        }
+
+        return result;
     }
 
     private void MarkCheckedPreviewOrdersAsCopiedEx()
@@ -459,6 +605,12 @@ public partial class MainForm
             order.OrderId?.Trim() ?? "",
             order.OrderItemCode?.Trim() ?? ""
         });
+    }
+
+    private bool IsOrderExcludedFromFetchEx(Cafe24Order order)
+    {
+        var key = BuildOrderStateKeyEx(order);
+        return !string.IsNullOrWhiteSpace(key) && _excludedOrderKeysEx.Contains(key);
     }
 
     private string GetPersistedOrderProgressCodeEx(Cafe24Order order)
@@ -546,6 +698,82 @@ public partial class MainForm
         }
     }
 
+    private IReadOnlyDictionary<string, ShipmentRequestOrderRowEx> BuildPreviewProductRowsByOrderKeyEx()
+    {
+        try
+        {
+            return BuildOrderExportRowsEx(_cafe24Orders)
+                .Where(row => !string.IsNullOrWhiteSpace(row.SourceOrderKey))
+                .GroupBy(row => row.SourceOrderKey, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"프리뷰 상품코드 계산 실패: {ex.Message}");
+            return new Dictionary<string, ShipmentRequestOrderRowEx>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private void ApplyPreviewVisibleColumnsEx()
+    {
+        if (dgvData == null || dgvData.Columns.Count == 0)
+            return;
+
+        foreach (DataGridViewColumn column in dgvData.Columns)
+        {
+            if (column.Name == OrderSelectColumnNameEx)
+            {
+                column.Visible = true;
+                continue;
+            }
+
+            column.Visible = _visiblePreviewColumnsEx.Count == 0 || _visiblePreviewColumnsEx.Contains(column.Name);
+        }
+    }
+
+    private void ShowPreviewColumnSelectDialogEx()
+    {
+        if (dgvData == null || dgvData.Columns.Count == 0)
+            return;
+
+        var columns = dgvData.Columns
+            .Cast<DataGridViewColumn>()
+            .Where(column => column.Name != OrderSelectColumnNameEx)
+            .Select(column => (column.Name, column.HeaderText))
+            .ToArray();
+
+        using var dialog = new StockColumnSelectDialogEx(columns, _visiblePreviewColumnsEx);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        _visiblePreviewColumnsEx = dialog.SelectedColumns.Count == 0
+            ? BuildDefaultPreviewColumnSetEx()
+            : new HashSet<string>(dialog.SelectedColumns, StringComparer.OrdinalIgnoreCase);
+        ApplyPreviewVisibleColumnsEx();
+        SaveEnhancedState();
+    }
+
+    private static HashSet<string> BuildDefaultPreviewColumnSetEx()
+    {
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            OrderAdditionCheckColumnNameEx,
+            "Source",
+            "No",
+            "OrderId",
+            "Market",
+            "OrderDate",
+            "ProductCode",
+            "StockQty",
+            "ProductName",
+            "Qty",
+            "Name",
+            "Phone",
+            "OrderStatus",
+            OrderProgressColumnNameEx
+        };
+    }
+
     private void UpdateOrderSelectionSummaryEx()
     {
         if (_lblOrderSelectionEx == null) return;
@@ -606,10 +834,12 @@ public partial class MainForm
         var validCount = rows.Count(row => !string.IsNullOrWhiteSpace(row.ProductCode));
         var missingCount = rows.Count - validCount;
         var optionIssueCount = rows.Count(row => row.HasOptionIssue);
+        var additionCheckCount = rows.Count(row => row.RequiresAdditionCheck);
         var extraColumnCount = CurrentOrderExportLeadingColumnCountEx;
         var extraSummary = extraColumnCount > 0 ? $" / 앞열 추가 {extraColumnCount}칸" : "";
         var issueSummary = optionIssueCount > 0 ? $" / 옵션 확인 {optionIssueCount}건" : "";
-        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건{issueSummary}{extraSummary}\n빈칸 건은 맨 위로 복사됩니다.";
+        var additionSummary = additionCheckCount > 0 ? $" / 추가확인 {additionCheckCount}건" : "";
+        _lblOrderExportSummaryEx.Text = $"선택 {orders.Count}건 / 코드 생성 {validCount}건 / 직접 입력 {missingCount}건{issueSummary}{additionSummary}{extraSummary}\n빈칸 건은 맨 위로 복사됩니다.";
 
         if (_itemOrderExportCopyEx != null) _itemOrderExportCopyEx.Enabled = true;
         if (_itemOrderExportSaveEx != null) _itemOrderExportSaveEx.Enabled = true;
@@ -654,6 +884,7 @@ public partial class MainForm
 
         var clipboardData = ShipmentRequestOrderExportFormatterEx.BuildClipboardDataObject(
             rows,
+            CurrentOrderExportIncludeAdditionCheckEx,
             CurrentOrderExportIncludeSupplierProductEx,
             CurrentOrderExportIncludeOptionEx);
 
@@ -717,6 +948,7 @@ public partial class MainForm
         ShipmentRequestOrderExportFormatterEx.SaveRowsAsWorkbook(
             rows,
             dialog.FileName,
+            CurrentOrderExportIncludeAdditionCheckEx,
             CurrentOrderExportIncludeSupplierProductEx,
             CurrentOrderExportIncludeOptionEx);
 
@@ -780,11 +1012,13 @@ public partial class MainForm
 
     private List<ShipmentRequestOrderRowEx> BuildOrderExportRowsEx(IReadOnlyCollection<Cafe24Order> orders)
     {
+        var additionCheckedOrderKeys = GetAdditionCheckedOrderKeysEx();
         return ShipmentRequestOrderExportFormatterEx.BuildRows(
             orders,
             CurrentOrderExportMarketNameEx,
             CurrentOrderExportDateTextEx,
-            LoadOrderExportProductCodeMappingsEx()).ToList();
+            LoadOrderExportProductCodeMappingsEx(),
+            additionCheckedOrderKeys).ToList();
     }
 
     private Dictionary<string, string> LoadOrderExportProductCodeMappingsEx()
@@ -845,15 +1079,30 @@ public partial class MainForm
             if (string.IsNullOrWhiteSpace(input.ProductKey) || string.IsNullOrWhiteSpace(productCode))
                 continue;
 
-            _db.UpsertShipmentRequestProductCodeMapping(new ShipmentRequestProductCodeMapping
+            try
             {
-                AppUserId = _currentUser.Id,
-                ProductKey = input.ProductKey,
-                SupplierProductName = input.SupplierProductName,
-                ProductOption = input.ProductOption,
-                ProductCode = productCode
-            });
-            savedCount++;
+                _db.UpsertShipmentRequestProductCodeMapping(new ShipmentRequestProductCodeMapping
+                {
+                    AppUserId = _currentUser.Id,
+                    ProductKey = input.ProductKey,
+                    SupplierProductName = input.SupplierProductName,
+                    ProductOption = input.ProductOption,
+                    ProductCode = productCode
+                });
+                savedCount++;
+            }
+            catch (Exception ex)
+            {
+                _log.Error("출고용 직접입력 상품코드 매핑 저장 실패", ex);
+                MessageBox.Show(this, $"상품코드 저장에 실패했습니다.\n{ex.Message}", "상품코드 저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        if (savedCount == 0)
+        {
+            MessageBox.Show(this, "저장할 상품코드가 입력되지 않았습니다.", "상품코드 없음", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
         }
 
         if (savedCount > 0)
@@ -991,12 +1240,17 @@ public partial class MainForm
 
     private bool CurrentOrderExportIncludeOptionEx => _chkOrderExportOptionEx?.Checked == true;
 
+    private bool CurrentOrderExportIncludeAdditionCheckEx => false;
+
     private int CurrentOrderExportLeadingColumnCountEx =>
+        (CurrentOrderExportIncludeAdditionCheckEx ? 1 : 0) +
         (CurrentOrderExportIncludeSupplierProductEx ? 1 : 0) +
         (CurrentOrderExportIncludeOptionEx ? 1 : 0);
 }
 internal sealed class ShipmentRequestOrderRowEx
 {
+    public string SourceOrderKey { get; init; } = string.Empty;
+    public bool RequiresAdditionCheck { get; init; }
     public string SupplierProductName { get; init; } = string.Empty;
     public string ProductOption { get; init; } = string.Empty;
     public string ProductMatchKey { get; init; } = string.Empty;
@@ -1024,6 +1278,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private const string SupplierProductHeader = "공급사상품명";
     private const string ProductOptionHeader = "옵션";
+    private const string AdditionCheckHeader = "추가확인";
 
     private static readonly string[] BaseHeaders =
     {
@@ -1041,7 +1296,9 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     private static readonly Regex AssignedOptionLetterRegex = new("=\\s*([A-Za-z])(?![A-Za-z])", RegexOptions.Compiled);
     private static readonly Regex StandaloneOptionLetterRegex = new("(?<![A-Za-z0-9])([A-Za-z])(?![A-Za-z0-9])", RegexOptions.Compiled);
-    private static readonly Regex ProductCodeRegex = new("\\b([A-Z]{2,}\\d+[A-Z])\\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    // 자체상품코드는 GS+숫자+옵션영문 형식만 인정한다. (P00000HF000E 같은 Cafe24 내부 P코드를 잘못 추출하지 않도록)
+    // 예: "GS0101156A_B중형" → "GS0101156A", "GS0300644A" → "GS0300644A"
+    private static readonly Regex ProductCodeRegex = new("(?<![A-Za-z0-9])(GS\\d{6,9}[A-Z])(?![A-Za-z0-9])", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static DateTime ResolveDefaultDate(IEnumerable<Cafe24Order> orders)
     {
@@ -1058,11 +1315,12 @@ internal static class ShipmentRequestOrderExportFormatterEx
         IEnumerable<Cafe24Order> orders,
         string marketName,
         string orderDateText,
-        IReadOnlyDictionary<string, string>? manualProductCodes = null)
+        IReadOnlyDictionary<string, string>? manualProductCodes = null,
+        IReadOnlySet<string>? additionCheckedOrderKeys = null)
     {
         var webocrMarketProductCodes = LoadWebocrMarketProductCodeMappings();
         var builtRows = orders
-            .Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes))
+            .Select(order => BuildRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes, additionCheckedOrderKeys))
             .ToList();
         var optionIssueRows = builtRows.Where(row => row.HasOptionIssue).ToList();
         var blankRows = builtRows.Where(row => !row.HasOptionIssue && string.IsNullOrWhiteSpace(row.ProductCode)).ToList();
@@ -1072,28 +1330,31 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
     public static string BuildPreview(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeAdditionCheck = false,
         bool includeSupplierProduct = false,
         bool includeOption = false)
     {
-        return BuildDelimitedText(rows, true, includeSupplierProduct, includeOption);
+        return BuildDelimitedText(rows, true, includeAdditionCheck, includeSupplierProduct, includeOption);
     }
 
     public static string BuildClipboardText(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeAdditionCheck = false,
         bool includeSupplierProduct = false,
         bool includeOption = false)
     {
-        return BuildDelimitedText(rows, false, includeSupplierProduct, includeOption);
+        return BuildDelimitedText(rows, false, includeAdditionCheck, includeSupplierProduct, includeOption);
     }
 
     public static DataObject BuildClipboardDataObject(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeAdditionCheck = false,
         bool includeSupplierProduct = false,
         bool includeOption = false)
     {
         var data = new DataObject();
-        data.SetText(BuildClipboardText(rows, includeSupplierProduct, includeOption), TextDataFormat.UnicodeText);
-        data.SetData(DataFormats.Html, BuildClipboardHtml(rows, includeSupplierProduct, includeOption));
+        data.SetText(BuildClipboardText(rows, includeAdditionCheck, includeSupplierProduct, includeOption), TextDataFormat.UnicodeText);
+        data.SetData(DataFormats.Html, BuildClipboardHtml(rows, includeAdditionCheck, includeSupplierProduct, includeOption));
         return data;
     }
 
@@ -1102,23 +1363,37 @@ internal static class ShipmentRequestOrderExportFormatterEx
         string marketName,
         string orderDateText,
         string filePath,
+        bool includeAdditionCheck = false,
         bool includeSupplierProduct = false,
         bool includeOption = false,
-        IReadOnlyDictionary<string, string>? manualProductCodes = null)
+        IReadOnlyDictionary<string, string>? manualProductCodes = null,
+        IReadOnlySet<string>? additionCheckedOrderKeys = null)
     {
-        var rows = BuildRows(orders, marketName, orderDateText, manualProductCodes).ToList();
-        SaveRowsAsWorkbook(rows, filePath, includeSupplierProduct, includeOption);
+        var rows = BuildRows(orders, marketName, orderDateText, manualProductCodes, additionCheckedOrderKeys).ToList();
+        SaveRowsAsWorkbook(rows, filePath, includeAdditionCheck, includeSupplierProduct, includeOption);
+    }
+
+    public static string BuildOrderKey(Cafe24Order order)
+    {
+        return string.Join("|", new[]
+        {
+            order.MallId?.Trim() ?? "",
+            order.OrderId?.Trim() ?? "",
+            order.OrderItemCode?.Trim() ?? "",
+            order.ShippingCode?.Trim() ?? ""
+        });
     }
 
     public static void SaveRowsAsWorkbook(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
         string filePath,
+        bool includeAdditionCheck = false,
         bool includeSupplierProduct = false,
         bool includeOption = false)
     {
         using var workbook = new XLWorkbook();
         var sheet = workbook.Worksheets.Add("Sheet1");
-        WriteWorksheet(sheet, rows, includeSupplierProduct, includeOption);
+        WriteWorksheet(sheet, rows, includeAdditionCheck, includeSupplierProduct, includeOption);
         workbook.SaveAs(filePath);
     }
 
@@ -1134,21 +1409,23 @@ internal static class ShipmentRequestOrderExportFormatterEx
     private static string BuildDelimitedText(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
         bool includeHeaders,
+        bool includeAdditionCheck,
         bool includeSupplierProduct,
         bool includeOption)
     {
         var sb = new StringBuilder();
         if (includeHeaders)
-            sb.AppendLine(string.Join("\t", BuildHeaders(includeSupplierProduct, includeOption)));
+            sb.AppendLine(string.Join("\t", BuildHeaders(includeAdditionCheck, includeSupplierProduct, includeOption)));
 
         foreach (var row in rows)
-            sb.AppendLine(string.Join("\t", BuildValues(row, includeSupplierProduct, includeOption)));
+            sb.AppendLine(string.Join("\t", BuildValues(row, includeAdditionCheck, includeSupplierProduct, includeOption)));
 
         return sb.ToString().TrimEnd('\r', '\n');
     }
 
     private static string BuildClipboardHtml(
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeAdditionCheck,
         bool includeSupplierProduct,
         bool includeOption)
     {
@@ -1160,7 +1437,7 @@ internal static class ShipmentRequestOrderExportFormatterEx
             var rowStyle = string.IsNullOrWhiteSpace(rowColor) ? "" : $" style=\"background-color:{rowColor};\"";
             table.Append("<tr").Append(rowStyle).Append('>');
 
-            foreach (var value in BuildValues(row, includeSupplierProduct, includeOption))
+            foreach (var value in BuildValues(row, includeAdditionCheck, includeSupplierProduct, includeOption))
             {
                 table.Append("<td style=\"mso-number-format:'\\@';border:1px solid #d9d9d9;\">")
                     .Append(WebUtility.HtmlEncode(value))
@@ -1201,9 +1478,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return header + html;
     }
 
-    private static string[] BuildHeaders(bool includeSupplierProduct, bool includeOption)
+    private static string[] BuildHeaders(bool includeAdditionCheck, bool includeSupplierProduct, bool includeOption)
     {
         var values = new List<string>();
+        if (includeAdditionCheck)
+            values.Add(AdditionCheckHeader);
         if (includeSupplierProduct)
             values.Add(SupplierProductHeader);
         if (includeOption)
@@ -1212,9 +1491,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         return values.ToArray();
     }
 
-    private static string[] BuildValues(ShipmentRequestOrderRowEx row, bool includeSupplierProduct, bool includeOption)
+    private static string[] BuildValues(ShipmentRequestOrderRowEx row, bool includeAdditionCheck, bool includeSupplierProduct, bool includeOption)
     {
         var values = new List<string>();
+        if (includeAdditionCheck)
+            values.Add(row.RequiresAdditionCheck ? "추가" : string.Empty);
         if (includeSupplierProduct)
             values.Add(Clean(row.SupplierProductName));
         if (includeOption)
@@ -1242,10 +1523,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
         string marketName,
         string orderDateText,
         IReadOnlyDictionary<string, string>? manualProductCodes,
-        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes,
+        IReadOnlySet<string>? additionCheckedOrderKeys)
     {
         if (MarketplaceSourceKey.IsCoupang(order.MallId))
-            return BuildCoupangRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes);
+            return BuildCoupangRow(order, marketName, orderDateText, manualProductCodes, webocrMarketProductCodes, additionCheckedOrderKeys);
 
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = SelectReceiver(orderJson, order);
@@ -1257,8 +1539,13 @@ internal static class ShipmentRequestOrderExportFormatterEx
         var optionLetter = ResolveOptionLetter(optionText);
         var finalProductCode = ApplyOptionLetter(baseProductCode, optionLetter);
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
-        if (!optionLetter.HasIssue)
-            finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
+        var optionIssue = optionLetter.IssueReason;
+        var manualProductCode = ResolveManualProductCode(productMatchKey, manualProductCodes);
+        if (!string.IsNullOrWhiteSpace(manualProductCode))
+        {
+            finalProductCode = manualProductCode;
+            optionIssue = string.Empty;
+        }
 
         var detailAddress = receiver?["address2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -1268,12 +1555,14 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
         return new ShipmentRequestOrderRowEx
         {
+            SourceOrderKey = BuildOrderKey(order),
+            RequiresAdditionCheck = additionCheckedOrderKeys?.Contains(BuildOrderKey(order)) == true,
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
             BaseProductCode = baseProductCode,
             ProductCode = finalProductCode,
-            OptionIssue = optionLetter.IssueReason,
+            OptionIssue = optionIssue,
             MarketName = marketName,
             ExportDate = orderDateText,
             Quantity = order.Quantity,
@@ -1291,7 +1580,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
         string marketName,
         string orderDateText,
         IReadOnlyDictionary<string, string>? manualProductCodes,
-        IReadOnlyDictionary<string, string>? webocrMarketProductCodes)
+        IReadOnlyDictionary<string, string>? webocrMarketProductCodes,
+        IReadOnlySet<string>? additionCheckedOrderKeys)
     {
         var orderJson = ParseOrderJson(order.RawJson);
         var receiver = orderJson?["receiver"] as JObject;
@@ -1322,8 +1612,12 @@ internal static class ShipmentRequestOrderExportFormatterEx
             }
         }
         var productMatchKey = BuildProductMappingKey(supplierProductName, optionText);
-        if (string.IsNullOrWhiteSpace(optionIssue))
-            finalProductCode = ApplyManualProductCode(finalProductCode, productMatchKey, manualProductCodes);
+        var manualProductCode = ResolveManualProductCode(productMatchKey, manualProductCodes);
+        if (!string.IsNullOrWhiteSpace(manualProductCode))
+        {
+            finalProductCode = manualProductCode;
+            optionIssue = string.Empty;
+        }
 
         var detailAddress = receiver?["addr2"]?.ToString() ?? string.Empty;
         var fullAddress = CombineAddress(
@@ -1337,6 +1631,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
 
         return new ShipmentRequestOrderRowEx
         {
+            SourceOrderKey = BuildOrderKey(order),
+            RequiresAdditionCheck = additionCheckedOrderKeys?.Contains(BuildOrderKey(order)) == true,
             SupplierProductName = supplierProductName,
             ProductOption = optionText,
             ProductMatchKey = productMatchKey,
@@ -1760,6 +2056,13 @@ internal static class ShipmentRequestOrderExportFormatterEx
     {
         if (!string.IsNullOrWhiteSpace(productCode))
             return productCode;
+        return ResolveManualProductCode(productMatchKey, manualProductCodes);
+    }
+
+    private static string ResolveManualProductCode(
+        string productMatchKey,
+        IReadOnlyDictionary<string, string>? manualProductCodes)
+    {
         if (string.IsNullOrWhiteSpace(productMatchKey) || manualProductCodes == null)
             return string.Empty;
 
@@ -1847,10 +2150,11 @@ internal static class ShipmentRequestOrderExportFormatterEx
     private static void WriteWorksheet(
         IXLWorksheet sheet,
         IReadOnlyList<ShipmentRequestOrderRowEx> rows,
+        bool includeAdditionCheck,
         bool includeSupplierProduct,
         bool includeOption)
     {
-        var headers = BuildHeaders(includeSupplierProduct, includeOption);
+        var headers = BuildHeaders(includeAdditionCheck, includeSupplierProduct, includeOption);
         for (int col = 0; col < headers.Length; col++)
             sheet.Cell(1, col + 1).Value = headers[col];
 
@@ -1860,6 +2164,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
             var excelRow = rowIndex + 2;
 
             var col = 1;
+            if (includeAdditionCheck)
+                sheet.Cell(excelRow, col++).Value = row.RequiresAdditionCheck ? "추가" : string.Empty;
             if (includeSupplierProduct)
                 sheet.Cell(excelRow, col++).Value = row.SupplierProductName;
             if (includeOption)
@@ -1893,6 +2199,8 @@ internal static class ShipmentRequestOrderExportFormatterEx
             return "#F4CCCC";
         if (string.IsNullOrWhiteSpace(row.ProductCode))
             return "#D9D9D9";
+        if (row.RequiresAdditionCheck)
+            return "#FFF2CC";
         return string.Empty;
     }
 
@@ -2017,6 +2325,8 @@ internal sealed class OrderExportProductCodeMappingDialogEx : Form
 
     public List<OrderExportProductCodeMappingInputEx> GetMappings()
     {
+        CommitPendingGridEdit();
+
         var mappings = new List<OrderExportProductCodeMappingInputEx>();
         foreach (DataGridViewRow row in _grid.Rows)
         {
@@ -2035,6 +2345,14 @@ internal sealed class OrderExportProductCodeMappingDialogEx : Form
         }
 
         return mappings;
+    }
+
+    private void CommitPendingGridEdit()
+    {
+        if (_grid.IsCurrentCellInEditMode)
+            _grid.EndEdit(DataGridViewDataErrorContexts.Commit);
+        if (_grid.IsCurrentCellDirty)
+            _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
     }
 }
 
