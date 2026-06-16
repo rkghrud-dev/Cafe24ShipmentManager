@@ -13,3 +13,6 @@ __pycache__/
 dist/
 installer/out/
 installer/SetupBootstrapper/Payload/
+# 작업 산출물/임시 파일 (스크린샷·UI덤프·자격증명 임시본 등은 커밋 금지)
+.codex-build-check/
+shipapp/tmp_*
