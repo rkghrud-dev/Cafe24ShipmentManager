@@ -421,6 +421,8 @@ public class Cafe24ApiClient : IMarketplaceApiClient
     /// </summary>
     private async Task<bool> RefreshAccessTokenAsync(bool allowReauthorize = true)
     {
+        using var tokenFileLock = Cafe24SharedTokenStore.AcquireTokenFileLock(_config.TokenFilePath, _log);
+
         // 여러 프로그램(송장관리자/WEBOCR 등)이 같은 토큰 파일을 공유한다.
         // Cafe24는 갱신 시 이전 refresh_token을 폐기하므로, 메모리의 옛 refresh로 갱신하면
         // 다른 프로그램이 먼저 회전시킨 경우 실패한다. 갱신 직전 파일에서 최신 refresh_token을 다시 읽는다.

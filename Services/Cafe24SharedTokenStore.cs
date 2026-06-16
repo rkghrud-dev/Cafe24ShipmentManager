@@ -5,6 +5,29 @@ namespace Cafe24ShipmentManager.Services;
 
 internal static class Cafe24SharedTokenStore
 {
+    private sealed class TokenFileLock : IDisposable
+    {
+        private readonly FileStream _stream;
+
+        public TokenFileLock(FileStream stream)
+        {
+            _stream = stream;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                _stream.Unlock(0, 1);
+            }
+            catch
+            {
+            }
+
+            _stream.Dispose();
+        }
+    }
+
     public static string GetDefaultPath()
     {
         return Path.Combine(
@@ -84,6 +107,37 @@ internal static class Cafe24SharedTokenStore
 
         File.WriteAllText(path, json.ToString(Formatting.Indented));
     }
+
+    public static IDisposable AcquireTokenFileLock(string? tokenFilePath, AppLogger? log = null)
+    {
+        var path = ResolvePath(tokenFilePath);
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var lockPath = path + ".lock";
+        var started = DateTime.UtcNow;
+        while (true)
+        {
+            try
+            {
+                var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+                stream.Lock(0, 1);
+                if ((DateTime.UtcNow - started).TotalSeconds >= 1)
+                    log?.Info($"Cafe24 토큰 잠금 획득: {lockPath}");
+                return new TokenFileLock(stream);
+            }
+            catch (IOException)
+            {
+                if ((DateTime.UtcNow - started).TotalSeconds > 60)
+                    throw new TimeoutException($"Cafe24 토큰 잠금 대기 시간 초과: {lockPath}");
+                Thread.Sleep(250);
+            }
+        }
+    }
+
     private static string ResolvePath(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))

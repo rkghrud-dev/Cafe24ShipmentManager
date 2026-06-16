@@ -77,6 +77,23 @@ public sealed class Cafe24TokenRefreshService
 
         try
         {
+            using var tokenFileLock = Cafe24SharedTokenStore.AcquireTokenFileLock(status.TokenFilePath, _log);
+            var latestStatus = LoadStatus(status.DisplayName, status.MallId, status.TokenFilePath);
+            if (!string.IsNullOrWhiteSpace(latestStatus.ClientId))
+                status.ClientId = latestStatus.ClientId;
+            if (!string.IsNullOrWhiteSpace(latestStatus.ClientSecret))
+                status.ClientSecret = latestStatus.ClientSecret;
+            if (!string.IsNullOrWhiteSpace(latestStatus.RefreshToken))
+                status.RefreshToken = latestStatus.RefreshToken;
+            if (!string.IsNullOrWhiteSpace(latestStatus.RedirectUri))
+                status.RedirectUri = latestStatus.RedirectUri;
+            if (!string.IsNullOrWhiteSpace(latestStatus.ApiVersion))
+                status.ApiVersion = latestStatus.ApiVersion;
+            if (!string.IsNullOrWhiteSpace(latestStatus.ShopNo))
+                status.ShopNo = latestStatus.ShopNo;
+            if (!string.IsNullOrWhiteSpace(latestStatus.Scope))
+                status.Scope = latestStatus.Scope;
+
             var tokenUrl = $"https://{status.MallId}.cafe24api.com/api/v2/oauth/token";
             var authBytes = Encoding.ASCII.GetBytes($"{status.ClientId}:{status.ClientSecret}");
             var authHeader = Convert.ToBase64String(authBytes);
